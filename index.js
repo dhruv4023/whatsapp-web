@@ -1,17 +1,20 @@
 const express = require('express');
-const qrcode = require('qrcode-terminal');
+require('dotenv').config()
+// const qrcode = require('qrcode-terminal');
+const qrcode = require('qrcode');
 const fs = require('fs');
+const path = require('path')
 const {
     default: makeWASocket,
     useMultiFileAuthState,
     fetchLatestBaileysVersion,
     DisconnectReason,
 } = require('@whiskeysockets/baileys');
-const { saveToDb, getCredsFromDb, deleteCredsFromDb } = require('./db');
+const { saveToDb, getCredsFromDb, deleteCredsFromDb, initDb } = require('./db');
 
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT;
 app.use(express.json());
 
 const sessions = {};
@@ -42,12 +45,24 @@ async function createSession(clientId) {
 
         sock.ev.on('creds.update', saveCreds);
 
-        sock.ev.on('connection.update', (update) => {
+        sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
 
             if (qr) {
-                console.log(`QR for ${clientId}:`);
-                qrcode.generate(qr, { small: true });
+                try {
+                    const qrBase64 = await qrcode.toDataURL(qr);
+                    return resolve({
+                        success: true,
+                        message: 'QR code generated',
+                        qrCode: qrBase64,
+                    });
+                } catch (err) {
+                    return reject({
+                        success: false,
+                        message: 'Failed to generate QR code',
+                        error: err.message,
+                    });
+                }
             }
 
             if (connection === 'close') {
@@ -93,11 +108,8 @@ app.get('/login/:clientId', async (req, res) => {
         return res.json({ message: `Client ${clientId} is already connected.` });
     }
     const response = await createSession(clientId)
-    if (response.success) {
-        res.status(200).json({ message: `QR Code shown in terminal for client ${clientId}.` });
-    } else {
-        res.status(500).json({ message: response.message });
-    }
+    res.status(response.success ? 200 : 500).json(response);
+    deleteSessionFiles(`./auth/${clientId}`)
 });
 
 app.post('/send/:clientId', async (req, res) => {
@@ -135,19 +147,30 @@ app.post('/send/:clientId', async (req, res) => {
 
 function deleteSessionFiles(sessionPath) {
     if (fs.existsSync(sessionPath)) {
-        fs.rm(sessionPath, { recursive: true, force: true }, (err) => {
+        fs.readdir(sessionPath, (err, files) => {
             if (err) {
-                console.error(`Failed to delete session files at ${sessionPath}:`, err);
-            } else {
-                console.log(`Deleted session files at ${sessionPath}`);
+                console.error(`Error reading directory ${sessionPath}:`, err);
+                return;
             }
+
+            files.forEach(file => {
+                if (file === 'creds.json') return;
+
+                const filePath = path.join(sessionPath, file);
+
+                fs.rm(filePath, { recursive: true, force: true }, (err) => {
+                    if (err) {
+                        console.error(`Failed to delete ${filePath}:`, err);
+                    }
+                });
+            });
         });
     } else {
         console.log(`Session path ${sessionPath} does not exist.`);
     }
 }
 
-
 app.listen(PORT, () => {
+    initDb()
     console.log(`🚀 Multi-client WhatsApp API running on http://localhost:${PORT}`);
 });

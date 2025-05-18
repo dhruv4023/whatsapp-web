@@ -3,3 +3,4 @@ node_modules
 .wwebjs_cache
 .wwebjs_auth
 auth
+auth.tmp
