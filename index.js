@@ -1,105 +1,153 @@
-import express from 'express';
-import pkg from 'whatsapp-web.js';
-// import qrcode from 'qrcode';
-import qrcode from 'qrcode-terminal';
-import dotenv from 'dotenv';
-const { Client, LocalAuth } = pkg;
+const express = require('express');
+const qrcode = require('qrcode-terminal');
+const fs = require('fs');
+const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    fetchLatestBaileysVersion,
+    DisconnectReason,
+} = require('@whiskeysockets/baileys');
+const { saveToDb, getCredsFromDb, deleteCredsFromDb } = require('./db');
 
-// Load environment variables
-dotenv.config();
 
 const app = express();
+const PORT = 3000;
 app.use(express.json());
 
-// Store active clients by studioId
-const clients = new Map();
+const sessions = {};
 
-// Initialize WhatsApp client
-app.post('/init/:studioId', async (req, res) => {
-    const { studioId } = req.params;
+async function createSession(clientId) {
+    const sessionPath = `./auth/${clientId}`;
+    fs.mkdirSync(sessionPath, { recursive: true });
 
-    if (clients.has(studioId)) {
-        return res.status(400).json({ error: 'Client already initialized for this studioId' });
+    const { version } = await fetchLatestBaileysVersion();
+    const credsFromDb = await getCredsFromDb(clientId);
+    let state;
+    let saveCreds;
+
+    if (credsFromDb) {
+        state = credsFromDb;
+        saveCreds = async () => { };
+    } else {
+        const auth = await useMultiFileAuthState(sessionPath);
+        state = auth.state;
+        saveCreds = async () => {
+            auth.saveCreds();
+            await saveToDb(clientId, auth.state.creds);
+        };
     }
 
-    try {
-        const client = new Client({
-            authStrategy: new LocalAuth({ clientId: studioId }),
-            puppeteer: { headless: true, args: ['--no-sandbox'] },
-        });
+    return new Promise((resolve, reject) => {
+        const sock = makeWASocket({ auth: state, version });
 
-        let qrCodeGenerated = false;
+        sock.ev.on('creds.update', saveCreds);
 
-        client.on('qr', (qr) => {
-            if (!qrCodeGenerated) {
-                qrCodeGenerated = true;
-                console.log(`QR Code for ${studioId}:`);
+        sock.ev.on('connection.update', (update) => {
+            const { connection, lastDisconnect, qr } = update;
+
+            if (qr) {
+                console.log(`QR for ${clientId}:`);
                 qrcode.generate(qr, { small: true });
-                // Do not send res here, keep it simple for now
+            }
+
+            if (connection === 'close') {
+                const reason = lastDisconnect?.error?.output?.statusCode;
+                sessions[clientId] = null;
+
+                console.log(`Connection for ${clientId} closed. Reason: ${reason === DisconnectReason.loggedOut ? "Logout" : "Other"
+                    }`);
+
+                if (reason === DisconnectReason.loggedOut) {
+                    deleteCredsFromDb(clientId);
+                    return reject({ success: false, message: "User logged out. Credentials deleted." });
+                }
+
+                if (reason === DisconnectReason.timedOut) {
+                    return reject({ success: false, message: "Connection timed out." });
+                }
+
+                // Any other case: try reconnecting
+                createSession(clientId).then(resolve).catch(reject);
+            }
+
+            if (connection === 'open') {
+                console.log(`✅ ${clientId} is connected`);
+                sessions[clientId] = sock;
+                return resolve({ success: true, message: "Connected", clientId });
             }
         });
 
-        client.on('ready', () => {
-            console.log(`${studioId} - WhatsApp client ready`);
-            clients.set(studioId, client);
+        sock.ev.on('connection.error', (err) => {
+            console.error('Connection error:', err);
+            reject({ success: false, message: "Failed to connect.", error: err });
         });
+    });
+}
 
-        client.on('disconnected', (reason) => {
-            console.log(`${studioId} - Disconnected: ${reason}`);
-            clients.delete(studioId);
-        });
 
-        await client.initialize();
 
-        res.status(200).json({ message: 'Client initialization started. Scan the QR code in terminal.' });
-
-    } catch (error) {
-        console.error(`Client initialization failed for ${studioId}:`, error);
-        res.status(500).json({ error: 'Failed to initialize client' });
+// 👤 Login route to initiate QR for a client
+app.get('/login/:clientId', async (req, res) => {
+    const { clientId } = req.params;
+    if (sessions[clientId]) {
+        return res.json({ message: `Client ${clientId} is already connected.` });
+    }
+    const response = await createSession(clientId)
+    if (response.success) {
+        res.status(200).json({ message: `QR Code shown in terminal for client ${clientId}.` });
+    } else {
+        res.status(500).json({ message: response.message });
     }
 });
 
+app.post('/send/:clientId', async (req, res) => {
+    const { clientId } = req.params;
+    const { numbers, message } = req.body;
 
-// Send message
-app.post('/send', async (req, res) => {
-    const { number, message, studioId } = req.body;
-    console.log(clients)
-
-    // Validate input
-    if (!number || !message || !studioId) {
-        return res.status(400).json({ error: 'Missing required fields: number, message, or studioId' });
+    const sock = sessions[clientId];
+    if (!sock) {
+        return res.status(400).json({ error: `Client ${clientId} not connected.` });
     }
 
-    const client = clients.get(studioId);
-    if (!client) {
-        return res.status(400).json({ error: 'Client not initialized for this studioId' });
+    if (!Array.isArray(numbers) || !message) {
+        return res.status(400).json({ error: 'numbers (array) and message are required' });
     }
 
-    try {
-        // Ensure client is ready
-        const isReady = await client.getState() === 'CONNECTED';
-        if (!isReady) {
-            return res.status(400).json({ error: 'Client not ready. Please authenticate first.' });
+    const failed = [];
+
+    for (const number of numbers) {
+        const jid = number.endsWith('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`;
+        try {
+            await sock.sendMessage(jid, { text: message });
+            console.log(`Sent to ${number}`);
+        } catch (err) {
+            console.log(`Failed to send to ${number}:`, err.message);
+            failed.push(number);
         }
-
-        const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
-        await client.sendMessage(chatId, message);
-        res.json({ success: true });
-    } catch (error) {
-        console.error(`Message sending failed for ${studioId}:`, error);
-        res.status(500).json({ error: 'Failed to send message' });
     }
+
+    res.json({
+        status: 'done',
+        failedNumbers: failed,
+        successCount: numbers.length - failed.length,
+    });
 });
 
-// Cleanup on server shutdown
-process.on('SIGINT', async () => {
-    console.log('Shutting down server...');
-    for (const [studioId, client] of clients) {
-        await client.destroy();
-        console.log(`${studioId} - Client destroyed`);
+function deleteSessionFiles(sessionPath) {
+    if (fs.existsSync(sessionPath)) {
+        fs.rm(sessionPath, { recursive: true, force: true }, (err) => {
+            if (err) {
+                console.error(`Failed to delete session files at ${sessionPath}:`, err);
+            } else {
+                console.log(`Deleted session files at ${sessionPath}`);
+            }
+        });
+    } else {
+        console.log(`Session path ${sessionPath} does not exist.`);
     }
-    process.exit(0);
-});
+}
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`WhatsApp sender server started on port ${PORT}`));
+
+app.listen(PORT, () => {
+    console.log(`🚀 Multi-client WhatsApp API running on http://localhost:${PORT}`);
+});
