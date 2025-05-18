@@ -1,4 +1,5 @@
-const express = require('express');
+const express = require('express'); 
+const cors = require('cors');
 require('dotenv').config()
 // const qrcode = require('qrcode-terminal');
 const qrcode = require('qrcode');
@@ -16,6 +17,23 @@ const { saveToDb, getCredsFromDb, deleteCredsFromDb, initDb } = require('./db');
 const app = express();
 const PORT = process.env.PORT;
 app.use(express.json());
+
+const corsOptions = {
+    origin: function (origin, callback) {
+        const allowedOrigins = JSON.parse(process.env.ORIGIN_URL_LIST);
+        if (allowedOrigins.includes(origin) || !origin) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true,
+    allowedHeaders: ["Authorization", "Content-Type"],
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+};
+
+app.use(cors(corsOptions));
+
 
 const sessions = {};
 
@@ -74,10 +92,14 @@ async function createSession(clientId) {
 
                 if (reason === DisconnectReason.loggedOut) {
                     deleteCredsFromDb(clientId);
+                    deleteSessionFiles(`./auth/${clientId}`, true);
+
+                    notifyWebhook({ success: false, message: "User logged out. Credentials deleted." })
                     return reject({ success: false, message: "User logged out. Credentials deleted." });
                 }
 
                 if (reason === DisconnectReason.timedOut) {
+                    notifyWebhook({ success: false, message: "Connection timed out." })
                     return reject({ success: false, message: "Connection timed out." });
                 }
 
@@ -88,13 +110,22 @@ async function createSession(clientId) {
             if (connection === 'open') {
                 console.log(`✅ ${clientId} is connected`);
                 sessions[clientId] = sock;
-                return resolve({ success: true, message: "Connected", clientId });
+
+                const payload = { success: true, message: "Connected", clientId };
+                sendSseToFrontend(clientId, payload);
+
+                notifyWebhook(payload);
+                return resolve(payload);
             }
+
         });
 
         sock.ev.on('connection.error', (err) => {
             console.error('Connection error:', err);
-            reject({ success: false, message: "Failed to connect.", error: err });
+            const payload = { success: false, message: "Failed to connect.", error: err };
+            sendSseToFrontend(payload);
+            notifyWebhook(payload)
+            reject(payload);
         });
     });
 }
@@ -107,8 +138,13 @@ app.get('/login/:clientId', async (req, res) => {
     if (sessions[clientId]) {
         return res.json({ message: `Client ${clientId} is already connected.` });
     }
-    const response = await createSession(clientId)
-    res.status(response.success ? 200 : 500).json(response);
+    try {
+        const response = await createSession(clientId);
+        res.status(response.success ? 200 : 500).json(response);
+    } catch (error) {
+        console.error("❌ Session creation failed:", error);
+        res.status(500).json({ success: false, message: "Failed to create session", error });
+    }
     deleteSessionFiles(`./auth/${clientId}`)
 });
 
@@ -145,7 +181,7 @@ app.post('/send/:clientId', async (req, res) => {
     });
 });
 
-function deleteSessionFiles(sessionPath) {
+function deleteSessionFiles(sessionPath, delCreds = false) {
     if (fs.existsSync(sessionPath)) {
         fs.readdir(sessionPath, (err, files) => {
             if (err) {
@@ -154,7 +190,7 @@ function deleteSessionFiles(sessionPath) {
             }
 
             files.forEach(file => {
-                if (file === 'creds.json') return;
+                if (!delCreds && file === 'creds.json') return;
 
                 const filePath = path.join(sessionPath, file);
 
@@ -169,6 +205,60 @@ function deleteSessionFiles(sessionPath) {
         console.log(`Session path ${sessionPath} does not exist.`);
     }
 }
+
+async function notifyWebhook(payload) {
+    const webhookUrl = process.env.WEBHOOK_URL;
+    if (!webhookUrl) return;
+
+    try {
+        const res = await fetch(webhookUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+
+        if (!res.ok) {
+            console.error(`❌ Webhook response error: ${res.status} ${res.statusText}`);
+        } else {
+            console.log(`🔔 Webhook notified:`, payload);
+        }
+    } catch (err) {
+        console.error(`❌ Failed to notify webhook:`, err.message);
+    }
+}
+
+const clients = {};
+
+app.get('/events/:clientId', (req, res) => {
+    const { clientId } = req.params;
+
+    // Set headers for SSE
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    // Send an initial event to confirm connection
+    res.write(`data: Connected to SSE for client ${clientId}\n\n`);
+
+    // Save connection for later use
+    clients[clientId] = res;
+
+    // Cleanup on client disconnect
+    req.on('close', () => {
+        delete clients[clientId];
+    });
+});
+
+function sendSseToFrontend(clientId, data) {
+    const client = clients[clientId];
+    if (client) {
+        client.write(`data: ${JSON.stringify(data)}\n\n`);
+    } else {
+        console.log(`No active SSE connection for client ${clientId}`);
+    }
+}
+
+
 
 app.listen(PORT, () => {
     initDb()

@@ -66,7 +66,10 @@ async function getCredsFromDb(clientId) {
 }
 
 async function deleteCredsFromDb(clientId) {
-  await pool.query('DELETE FROM ww_sessions WHERE client_id = ?', [clientId]);
+  try {
+    await pool.query('DELETE FROM ww_sessions WHERE client_id = ?', [clientId]);
+  } catch (error) {
+  }
 }
 
 module.exports = {
