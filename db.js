@@ -72,16 +72,21 @@ async function deleteCredsFromDb(clientId) {
   }
 }
 
+async function updateWhatsAppStatus(studioId, status) {
+  try {
+    const sql = `UPDATE studio SET whatsapp_status = ? WHERE id = ?`;
+    await pool.query(sql, [status, studioId]);
+    // console.log(`Updated WhatsApp status to '${status}' for studio_id: ${studioId}`);
+  } catch (err) {
+    console.error('Error updating WhatsApp status:', err.message);
+  }
+}
+
+
 module.exports = {
   initDb,
   saveToDb,
   getCredsFromDb,
-  deleteCredsFromDb
+  deleteCredsFromDb,
+  updateWhatsAppStatus
 };
-
-// async function x() {
-//   console.log((await getCredsFromDb("clientA")))
-// }
-
-// x()
-

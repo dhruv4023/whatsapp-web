@@ -1,4 +1,4 @@
-const express = require('express'); 
+const express = require('express');
 const cors = require('cors');
 require('dotenv').config()
 // const qrcode = require('qrcode-terminal');
@@ -11,7 +11,7 @@ const {
     fetchLatestBaileysVersion,
     DisconnectReason,
 } = require('@whiskeysockets/baileys');
-const { saveToDb, getCredsFromDb, deleteCredsFromDb, initDb } = require('./db');
+const { saveToDb, getCredsFromDb, deleteCredsFromDb, initDb, updateWhatsAppStatus } = require('./db');
 
 
 const app = express();
@@ -42,26 +42,21 @@ async function createSession(clientId) {
     fs.mkdirSync(sessionPath, { recursive: true });
 
     const { version } = await fetchLatestBaileysVersion();
-    const credsFromDb = await getCredsFromDb(clientId);
-    let state;
-    let saveCreds;
+    const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
 
+    // Optionally load previously saved creds from DB and patch into state
+    const credsFromDb = await getCredsFromDb(clientId);
     if (credsFromDb) {
-        state = credsFromDb;
-        saveCreds = async () => { };
-    } else {
-        const auth = await useMultiFileAuthState(sessionPath);
-        state = auth.state;
-        saveCreds = async () => {
-            auth.saveCreds();
-            await saveToDb(clientId, auth.state.creds);
-        };
+        Object.assign(state.creds, credsFromDb); // patch only the creds if available
     }
 
     return new Promise((resolve, reject) => {
         const sock = makeWASocket({ auth: state, version });
 
-        sock.ev.on('creds.update', saveCreds);
+        sock.ev.on('creds.update', async () => {
+            await saveCreds();
+            await saveToDb(clientId, state.creds); // save only state.creds, not full state
+        });
 
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
@@ -87,19 +82,16 @@ async function createSession(clientId) {
                 const reason = lastDisconnect?.error?.output?.statusCode;
                 sessions[clientId] = null;
 
-                console.log(`Connection for ${clientId} closed. Reason: ${reason === DisconnectReason.loggedOut ? "Logout" : "Other"
-                    }`);
+                console.log(`Connection for ${clientId} closed. Reason: ${reason === DisconnectReason.loggedOut ? "Logout" : "Other"}`);
 
                 if (reason === DisconnectReason.loggedOut) {
                     deleteCredsFromDb(clientId);
                     deleteSessionFiles(`./auth/${clientId}`, true);
-
-                    notifyWebhook({ success: false, message: "User logged out. Credentials deleted." })
+                    updateWhatsAppStatus(clientId, "LOGOUT");
                     return reject({ success: false, message: "User logged out. Credentials deleted." });
                 }
 
                 if (reason === DisconnectReason.timedOut) {
-                    notifyWebhook({ success: false, message: "Connection timed out." })
                     return reject({ success: false, message: "Connection timed out." });
                 }
 
@@ -112,19 +104,14 @@ async function createSession(clientId) {
                 sessions[clientId] = sock;
 
                 const payload = { success: true, message: "Connected", clientId };
-                sendSseToFrontend(clientId, payload);
-
-                notifyWebhook(payload);
+                updateWhatsAppStatus(clientId, "ACTIVE");
                 return resolve(payload);
             }
-
         });
 
         sock.ev.on('connection.error', (err) => {
             console.error('Connection error:', err);
             const payload = { success: false, message: "Failed to connect.", error: err };
-            sendSseToFrontend(payload);
-            notifyWebhook(payload)
             reject(payload);
         });
     });
@@ -206,57 +193,57 @@ function deleteSessionFiles(sessionPath, delCreds = false) {
     }
 }
 
-async function notifyWebhook(payload) {
-    const webhookUrl = process.env.WEBHOOK_URL;
-    if (!webhookUrl) return;
+// async function notifyWebhook(payload) {
+//     const webhookUrl = process.env.WEBHOOK_URL;
+//     if (!webhookUrl) return;
 
-    try {
-        const res = await fetch(webhookUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
+//     try {
+//         const res = await fetch(webhookUrl, {
+//             method: 'POST',
+//             headers: { 'Content-Type': 'application/json' },
+//             body: JSON.stringify(payload),
+//         });
 
-        if (!res.ok) {
-            console.error(`❌ Webhook response error: ${res.status} ${res.statusText}`);
-        } else {
-            console.log(`🔔 Webhook notified:`, payload);
-        }
-    } catch (err) {
-        console.error(`❌ Failed to notify webhook:`, err.message);
-    }
-}
+//         if (!res.ok) {
+//             console.error(`❌ Webhook response error: ${res.status} ${res.statusText}`);
+//         } else {
+//             console.log(`🔔 Webhook notified:`, payload);
+//         }
+//     } catch (err) {
+//         console.error(`❌ Failed to notify webhook:`, err.message);
+//     }
+// }
 
-const clients = {};
+// const clients = {};
 
-app.get('/events/:clientId', (req, res) => {
-    const { clientId } = req.params;
+// app.get('/events/:clientId', (req, res) => {
+//     const { clientId } = req.params;
 
-    // Set headers for SSE
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
+//     // Set headers for SSE
+//     res.setHeader('Content-Type', 'text/event-stream');
+//     res.setHeader('Cache-Control', 'no-cache');
+//     res.setHeader('Connection', 'keep-alive');
 
-    // Send an initial event to confirm connection
-    res.write(`data: Connected to SSE for client ${clientId}\n\n`);
+//     // Send an initial event to confirm connection
+//     res.write(`data: Connected to SSE for client ${clientId}\n\n`);
 
-    // Save connection for later use
-    clients[clientId] = res;
+//     // Save connection for later use
+//     clients[clientId] = res;
 
-    // Cleanup on client disconnect
-    req.on('close', () => {
-        delete clients[clientId];
-    });
-});
+//     // Cleanup on client disconnect
+//     req.on('close', () => {
+//         delete clients[clientId];
+//     });
+// });
 
-function sendSseToFrontend(clientId, data) {
-    const client = clients[clientId];
-    if (client) {
-        client.write(`data: ${JSON.stringify(data)}\n\n`);
-    } else {
-        console.log(`No active SSE connection for client ${clientId}`);
-    }
-}
+// function sendSseToFrontend(clientId, data) {
+//     const client = clients[clientId];
+//     if (client) {
+//         client.write(`data: ${JSON.stringify(data)}\n\n`);
+//     } else {
+//         console.log(`No active SSE connection for client ${clientId}`);
+//     }
+// }
 
 
 
