@@ -14,12 +14,11 @@ const pool = mysql.createPool({
 
 async function initDb() {
   const sql = `
-    CREATE TABLE IF NOT EXISTS ww_sessions (
+    CREATE TABLE IF NOT EXISTS whatsapp_web_session (
       client_id VARCHAR(255) NOT NULL PRIMARY KEY,
       creds TEXT NOT NULL,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      test INT NOT NULL DEFAULT 0
+      last_modified_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     ) ENGINE = InnoDB;
   `;
   await pool.query(sql);
@@ -51,7 +50,7 @@ function parseBaileysData(jsonStr) {
 async function saveToDb(clientId, creds) {
   const credsStr = JSON.stringify(creds);
   const sql = `
-    INSERT INTO ww_sessions (client_id, creds)
+    INSERT INTO whatsapp_web_session (client_id, creds)
     VALUES (?, ?)
     ON DUPLICATE KEY UPDATE creds = VALUES(creds)
   `;
@@ -60,28 +59,32 @@ async function saveToDb(clientId, creds) {
 }
 
 async function getCredsFromDb(clientId) {
-  const [rows] = await pool.query('SELECT creds FROM ww_sessions WHERE client_id = ?', [clientId]);
+  const [rows] = await pool.query('SELECT creds FROM whatsapp_web_session WHERE client_id = ?', [clientId]);
   if (rows.length === 0) return null;
   return { creds: parseBaileysData(rows[0].creds) };
 }
 
 async function deleteCredsFromDb(clientId) {
   try {
-    await pool.query('DELETE FROM ww_sessions WHERE client_id = ?', [clientId]);
+    await pool.query('DELETE FROM whatsapp_web_session WHERE client_id = ?', [clientId]);
   } catch (error) {
   }
 }
+
+async function updateWhatsAppStatus(studioId, status) {
+  try {
+    const sql = `UPDATE branch SET whatsapp_status = ? WHERE id = ?`;
+    await pool.query(sql, [status, studioId]);
+  } catch (err) {
+    console.error('Error updating WhatsApp status:', err.message);
+  }
+}
+
 
 module.exports = {
   initDb,
   saveToDb,
   getCredsFromDb,
-  deleteCredsFromDb
+  deleteCredsFromDb,
+  updateWhatsAppStatus
 };
-
-// async function x() {
-//   console.log((await getCredsFromDb("clientA")))
-// }
-
-// x()
-
