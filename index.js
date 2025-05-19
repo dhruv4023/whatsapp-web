@@ -67,13 +67,13 @@ async function createSession(clientId) {
                     return resolve({
                         success: true,
                         message: 'QR code generated',
-                        qrCode: qrBase64,
+                        data: { qrCode: qrBase64 },
                     });
-                } catch (err) {
+                } catch (error) {
                     return reject({
                         success: false,
                         message: 'Failed to generate QR code',
-                        error: err.message,
+                        data: { error },
                     });
                 }
             }
@@ -88,11 +88,11 @@ async function createSession(clientId) {
                     deleteCredsFromDb(clientId);
                     deleteSessionFiles(`./auth/${clientId}`, true);
                     updateWhatsAppStatus(clientId, "LOGOUT");
-                    return reject({ success: false, message: "User logged out. Credentials deleted." });
+                    return reject({ success: false, message: "User logged out. Credentials deleted.", data: {} });
                 }
 
                 if (reason === DisconnectReason.timedOut) {
-                    return reject({ success: false, message: "Connection timed out." });
+                    return reject({ success: false, message: "Connection timed out.", data: {} });
                 }
 
                 // Any other case: try reconnecting
@@ -103,15 +103,15 @@ async function createSession(clientId) {
                 console.log(`✅ ${clientId} is connected`);
                 sessions[clientId] = sock;
 
-                const payload = { success: true, message: "Connected", clientId };
+                const payload = { success: true, message: "Connected", data: {} };
                 updateWhatsAppStatus(clientId, "ACTIVE");
                 return resolve(payload);
             }
         });
 
-        sock.ev.on('connection.error', (err) => {
-            console.error('Connection error:', err);
-            const payload = { success: false, message: "Failed to connect.", error: err };
+        sock.ev.on('connection.error', (error) => {
+            console.error('Connection error:', error);
+            const payload = { success: false, message: "Failed to connect.", data: { error }, };
             reject(payload);
         });
     });
@@ -130,7 +130,7 @@ app.get('/login/:clientId', async (req, res) => {
         res.status(response.success ? 200 : 500).json(response);
     } catch (error) {
         console.error("❌ Session creation failed:", error);
-        res.status(500).json({ success: false, message: "Failed to create session", error });
+        res.status(500).json(error);
     }
     deleteSessionFiles(`./auth/${clientId}`)
 });
