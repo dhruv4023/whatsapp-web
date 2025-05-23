@@ -73,7 +73,7 @@ async function deleteCredsFromDb(clientId) {
 
 async function updateWhatsAppStatus(studioId, status) {
   try {
-    const sql = `UPDATE studio SET whatsapp_status = ? WHERE id = ?`;
+    const sql = `UPDATE branch SET whatsapp_status = ? WHERE id = ?`;
     await pool.query(sql, [status, studioId]);
   } catch (err) {
     console.error('Error updating WhatsApp status:', err.message);
