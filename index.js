@@ -49,84 +49,87 @@ async function createSession(clientId) {
     if (credsFromDb) {
         Object.assign(state.creds, credsFromDb); // patch only the creds if available
     }
+    try {
+        return new Promise((resolve, reject) => {
+            const sock = makeWASocket({ auth: state, version });
 
-    return new Promise((resolve, reject) => {
-        const sock = makeWASocket({ auth: state, version });
+            sock.ev.on('creds.update', async () => {
+                await saveCreds();
+                await saveToDb(clientId, state.creds); // save only state.creds, not full state
+            });
 
-        sock.ev.on('creds.update', async () => {
-            await saveCreds();
-            await saveToDb(clientId, state.creds); // save only state.creds, not full state
+            sock.ev.on('connection.update', async (update) => {
+                const { connection, lastDisconnect, qr } = update;
+
+                if (qr) {
+                    try {
+                        const qrBase64 = await qrcode.toDataURL(qr);
+                        // qrcode.generate(qr, {small: true});
+                        return resolve({
+                            success: true,
+                            message: 'QR code generated',
+                            data: { qrCode: qrBase64 },
+                        });
+                    } catch (error) {
+                        return reject({
+                            success: false,
+                            message: 'Failed to generate QR code',
+                            data: { error },
+                        });
+                    }
+                }
+
+                if (connection === 'close') {
+                    const reason = lastDisconnect?.error?.output?.statusCode;
+                    sessions[clientId] = null;
+
+                    console.log(`Connection for ${clientId} closed. Reason: ${reason === DisconnectReason.loggedOut ? "Logout" : "Other"}`);
+                    if (reason === DisconnectReason.connectionClosed) {
+                        return reject({ success: false, message: "Connection closed by server.", data: {} });
+                    }
+
+                    if (reason === DisconnectReason.connectionLost) {
+                        return reject({ success: false, message: "Connection lost. Please try reconnecting.", data: {} });
+                    }
+
+                    if (reason === DisconnectReason.unavailableService) {
+                        return reject({ success: false, message: "Service unavailable. Please try again later.", data: {} });
+                    }
+                    if (reason === DisconnectReason.loggedOut) {
+                        deleteCredsFromDb(clientId);
+                        deleteSessionFiles(`./auth/${clientId}`, true);
+                        updateWhatsAppStatus(clientId, "LOGOUT");
+                        return reject({ success: false, message: "User logged out. Credentials deleted.", data: {} });
+                    }
+
+                    if (reason === DisconnectReason.timedOut) {
+                        return reject({ success: false, message: "Connection timed out.", data: {} });
+                    }
+
+                    if (reason == DisconnectReason.restartRequired) {
+                        createSession(clientId).then(resolve).catch(reject);
+                    }
+                }
+
+                if (connection === 'open') {
+                    console.log(`✅ ${clientId} is connected`);
+                    sessions[clientId] = sock;
+
+                    const payload = { success: true, message: "Connected", data: {} };
+                    updateWhatsAppStatus(clientId, "ACTIVE");
+                    return resolve(payload);
+                }
+            });
+
+            sock.ev.on('connection.error', (error) => {
+                console.error('Connection error:', error);
+                const payload = { success: false, message: "Failed to connect.", data: { error }, };
+                reject(payload);
+            });
         });
-
-        sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect, qr } = update;
-
-            if (qr) {
-                try {
-                    const qrBase64 = await qrcode.toDataURL(qr);
-                    // qrcode.generate(qr, {small: true});
-                    return resolve({
-                        success: true,
-                        message: 'QR code generated',
-                        data: { qrCode: qrBase64 },
-                    });
-                } catch (error) {
-                    return reject({
-                        success: false,
-                        message: 'Failed to generate QR code',
-                        data: { error },
-                    });
-                }
-            }
-
-            if (connection === 'close') {
-                const reason = lastDisconnect?.error?.output?.statusCode;
-                sessions[clientId] = null;
-
-                console.log(`Connection for ${clientId} closed. Reason: ${reason === DisconnectReason.loggedOut ? "Logout" : "Other"}`);
-                if (reason === DisconnectReason.connectionClosed) {
-                    return reject({ success: false, message: "Connection closed by server.", data: {} });
-                }
-
-                if (reason === DisconnectReason.connectionLost) {
-                    return reject({ success: false, message: "Connection lost. Please try reconnecting.", data: {} });
-                }
-
-                if (reason === DisconnectReason.unavailableService) {
-                    return reject({ success: false, message: "Service unavailable. Please try again later.", data: {} });
-                }
-                if (reason === DisconnectReason.loggedOut) {
-                    deleteCredsFromDb(clientId);
-                    deleteSessionFiles(`./auth/${clientId}`, true);
-                    updateWhatsAppStatus(clientId, "LOGOUT");
-                    return reject({ success: false, message: "User logged out. Credentials deleted.", data: {} });
-                }
-
-                if (reason === DisconnectReason.timedOut) {
-                    return reject({ success: false, message: "Connection timed out.", data: {} });
-                }
-
-                if (reason == DisconnectReason.restartRequired) {
-                    createSession(clientId).then(resolve).catch(reject);
-                }
-            }
-
-            if (connection === 'open') {
-                console.log(`✅ ${clientId} is connected`);
-                sessions[clientId] = sock;
-
-                const payload = { success: true, message: "Connected", data: {} };
-                updateWhatsAppStatus(clientId, "ACTIVE");
-                return resolve(payload);
-            }
-        });
-
-        sock.ev.on('connection.error', (error) => {
-            console.error('Connection error:', error);
-            const payload = { success: false, message: "Failed to connect.", data: { error }, };
-            reject(payload);
-        });
-    });
+    } catch (error) {
+        console.error(error)
+    }
 }
 
 
@@ -140,7 +143,7 @@ app.get('/login/:clientId', async (req, res) => {
                 {
                     "webWhatsAppStatus": "ACTIVE"
                 }
-            ], message: `Client ${clientId} is already connected.`
+            ], message: `You are already connected.`
         });
     }
     try {
@@ -167,22 +170,26 @@ app.post('/send/:clientId', async (req, res) => {
     }
 
     const failed = [];
+    const sentTo = []
 
     for (const number of numbers) {
         const jid = number.endsWith('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`;
         try {
             await sock.sendMessage(jid, { text: message });
-            console.log(`Sent to ${number}`);
+            sentTo.push(number)
         } catch (err) {
-            console.log(`Failed to send to ${number}:`, err.message);
+            console.error(`Failed to send to ${number}:`, err.message);
             failed.push(number);
         }
     }
 
-    res.json({
-        status: 'done',
-        failedNumbers: failed,
-        successCount: numbers.length - failed.length,
+    res.status(200).json({
+        status: true,
+        message: `sent successfully to ${sentTo.length} & failed for ${failed.length}`,
+        data: {
+            succeedNumbers: sentTo,
+            failedNumbers: failed,
+        }
     });
 });
 
