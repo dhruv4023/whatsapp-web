@@ -4,3 +4,5 @@ node_modules
 .wwebjs_auth
 auth
 auth.tmp
+package-lock.json
+dist

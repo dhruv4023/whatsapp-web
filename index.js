@@ -13,6 +13,8 @@ const {
 } = require('@whiskeysockets/baileys');
 const { saveToDb, getCredsFromDb, deleteCredsFromDb, initDb, updateWhatsAppStatus } = require('./db');
 
+const multer = require("multer");
+
 
 const app = express();
 const PORT = process.env.PORT;
@@ -38,20 +40,31 @@ app.use(cors(corsOptions));
 const sessions = {};
 
 async function createSession(clientId) {
-    const sessionPath = `./auth/${clientId}`;
-    fs.mkdirSync(sessionPath, { recursive: true });
-
-    const { version } = await fetchLatestBaileysVersion();
-    const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-
-    // Optionally load previously saved creds from DB and patch into state
-    const credsFromDb = await getCredsFromDb(clientId);
-    if (credsFromDb) {
-        Object.assign(state.creds, credsFromDb); // patch only the creds if available
-    }
     try {
+        const sessionPath = `./auth/${clientId}`;
+        fs.mkdirSync(sessionPath, { recursive: true });
+
+        const { version } = await fetchLatestBaileysVersion();
+        const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+
+        // Optionally load previously saved creds from DB and patch into state
+        const credsFromDb = await getCredsFromDb(clientId);
+        if (credsFromDb) {
+            Object.assign(state.creds, credsFromDb); // patch only the creds if available
+        }
         return new Promise((resolve, reject) => {
-            const sock = makeWASocket({ auth: state, version });
+            const sock = makeWASocket({
+                auth: state, version,
+                syncFullHistory: false,
+                printQRInTerminal: false,
+                browser: ['MultiClient', 'Chrome', '3.0'],
+                markOnlineOnConnect: false,
+                generateHighQualityLinkPreview: false,
+            });
+
+            sock.ev.removeAllListeners("messages.upsert")
+            sock.ev.removeAllListeners("chats.set")
+            sock.ev.removeAllListeners("contacts.set")
 
             sock.ev.on('creds.update', async () => {
                 await saveCreds();
@@ -156,49 +169,46 @@ app.get('/login/:clientId', async (req, res) => {
     deleteSessionFiles(`./auth/${clientId}`)
 });
 
-app.post('/send/:clientId', async (req, res) => {
-    const { clientId } = req.params;
-    const { numbers, message } = req.body;
+// app.post('/send/:clientId', async (req, res) => {
+//     const { clientId } = req.params;
+//     const { numbers, message } = req.body;
 
-    const sock = sessions[clientId];
-    if (!sock) {
-        return res.status(400).json({ error: `Client ${clientId} not connected.` });
-    }
+//     const sock = sessions[clientId];
+//     if (!sock) {
+//         return res.status(400).json({ error: `Client ${clientId} not connected.` });
+//     }
 
-    if (!Array.isArray(numbers) || !message) {
-        return res.status(400).json({ error: 'numbers (array) and message are required' });
-    }
+//     if (!Array.isArray(numbers) || !message) {
+//         return res.status(400).json({ error: 'numbers (array) and message are required' });
+//     }
 
-    const failed = [];
-    const sentTo = []
+//     const failed = [];
+//     const sentTo = []
 
-    for (const number of numbers) {
-        const jid = number.endsWith('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`;
-        try {
-            await sock.sendMessage(jid, { text: message });
-            sentTo.push(number)
-        } catch (err) {
-            console.error(`Failed to send to ${number}:`, err.message);
-            failed.push(number);
-        }
-    }
+//     for (const number of numbers) {
+//         const jid = number.endsWith('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`;
+//         try {
+//             await sock.sendMessage(jid, { text: message });
+//             sentTo.push(number)
+//         } catch (err) {
+//             console.error(`Failed to send to ${number}:`, err.message);
+//             failed.push(number);
+//         }
+//     }
 
-    res.status(200).json({
-        status: true,
-        message: `sent successfully to ${sentTo.length} & failed for ${failed.length}`,
-        data: {
-            succeedNumbers: sentTo,
-            failedNumbers: failed,
-        }
-    });
-});
+//     res.status(200).json({
+//         status: true,
+//         message: `sent successfully to ${sentTo.length} & failed for ${failed.length}`,
+//         data: {
+//             succeedNumbers: sentTo,
+//             failedNumbers: failed,
+//         }
+//     });
+// });
 
 
 app.get('/logout/:clientId', async (req, res) => {
     const { clientId } = req.params;
-    if (sessions[clientId]) {
-        return res.json({ message: `You are already connected.` });
-    }
     try {
         deleteCredsFromDb(clientId);
         updateWhatsAppStatus(clientId, "LOGOUT");
@@ -208,6 +218,97 @@ app.get('/logout/:clientId', async (req, res) => {
         res.status(500).json(error);
     }
     deleteSessionFiles(`./auth/${clientId}`, true)
+});
+
+const upload = multer({ storage: multer.memoryStorage() });
+
+// Universal file send (PDF, Image, Video, Audio, etc.)
+app.post('/send/:clientId', upload.single("file"), async (req, res) => {
+    const { clientId } = req.params;
+    const { numbers, message } = req.body;
+
+    try {
+        
+    const sock = sessions[clientId];
+    if (!sock) {
+        return res.status(400).json({ error: `Client ${clientId} not connected.` });
+    }
+
+    if (!numbers) {
+        return res.status(400).json({ error: 'numbers (JSON array) are required' });
+    }
+
+    let parsedNumbers;
+    try {
+        parsedNumbers = JSON.parse(numbers);
+    } catch (err) {
+        return res.status(400).json({ error: 'numbers must be a valid JSON array' });
+    }
+
+    const failed = [];
+    const sentTo = [];
+
+    for (const number of parsedNumbers) {
+        const jid = number.endsWith('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`;
+
+        try {
+            let messageOptions = {};
+            if (req.file) {
+                const fileMime = req.file.mimetype;
+
+                if (fileMime.startsWith("image/")) {
+                    messageOptions = {
+                        image: req.file.buffer,
+                        mimetype: fileMime,
+                        caption: message || ""
+                    };
+                } else if (fileMime.startsWith("video/")) {
+                    messageOptions = {
+                        video: req.file.buffer,
+                        mimetype: fileMime,
+                        caption: message || ""
+                    };
+                } else if (fileMime.startsWith("audio/")) {
+                    messageOptions = {
+                        audio: req.file.buffer,
+                        mimetype: fileMime,
+                        ptt: false // set true if you want it as voice note
+                    };
+                } else {
+                    // default: send as document (PDF, DOCX, ZIP, etc.)
+                    messageOptions = {
+                        document: req.file.buffer,
+                        mimetype: fileMime || 'application/octet-stream',
+                        fileName: req.file.originalname,
+                        caption: message || "📎 Document"
+                    };
+                }
+                await sock.sendMessage(jid, messageOptions);
+                sentTo.push(number);
+            } else {
+                await sock.sendMessage(jid, { text: message });
+                sentTo.push(number)
+            }
+        } catch (err) {
+            console.error(err)
+            console.error(`Failed to send file to ${number}:`, err.message);
+            failed.push(number);
+        }
+    }
+
+    res.status(200).json({
+        status: true,
+        message: `File sent successfully to ${sentTo.length} & failed for ${failed.length}`,
+        data: {
+            succeedNumbers: sentTo,
+            failedNumbers: failed,
+        }
+    });
+
+    } catch (error) {
+        console.error("❌ Sending file failed:", error);
+        res.status(500).json({ success: false, message: "Failed to send file.", data: { error } });   
+    }
 });
 
 function deleteSessionFiles(sessionPath, delCreds = false) {
