@@ -169,44 +169,6 @@ app.get('/login/:clientId', async (req, res) => {
     deleteSessionFiles(`./auth/${clientId}`)
 });
 
-// app.post('/send/:clientId', async (req, res) => {
-//     const { clientId } = req.params;
-//     const { numbers, message } = req.body;
-
-//     const sock = sessions[clientId];
-//     if (!sock) {
-//         return res.status(400).json({ error: `Client ${clientId} not connected.` });
-//     }
-
-//     if (!Array.isArray(numbers) || !message) {
-//         return res.status(400).json({ error: 'numbers (array) and message are required' });
-//     }
-
-//     const failed = [];
-//     const sentTo = []
-
-//     for (const number of numbers) {
-//         const jid = number.endsWith('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`;
-//         try {
-//             await sock.sendMessage(jid, { text: message });
-//             sentTo.push(number)
-//         } catch (err) {
-//             console.error(`Failed to send to ${number}:`, err.message);
-//             failed.push(number);
-//         }
-//     }
-
-//     res.status(200).json({
-//         status: true,
-//         message: `sent successfully to ${sentTo.length} & failed for ${failed.length}`,
-//         data: {
-//             succeedNumbers: sentTo,
-//             failedNumbers: failed,
-//         }
-//     });
-// });
-
-
 app.get('/logout/:clientId', async (req, res) => {
     const { clientId } = req.params;
     try {
