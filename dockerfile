@@ -1,20 +1,26 @@
-# Use Node.js official image as a base
-FROM node:18-alpine
+# Stage 1: Install dependencies
+FROM node:22-alpine AS deps
 
-# Set the working directory inside the container
-WORKDIR /usr/src/auth-server
+# Set working directory
+WORKDIR /usr/src/app
 
-# Copy package.json and package-lock.json
+# Copy package files and install only production deps
 COPY package*.json ./
+RUN npm ci --only=production
 
-# Install dependencies
-RUN npm install
+# Stage 2: Copy app and dependencies into minimal image
+FROM node:22-alpine AS runtime
 
-# Copy the rest of the application code
+WORKDIR /usr/src/app
+
+# Copy only production node_modules from previous stage
+COPY --from=deps /usr/src/app/node_modules ./node_modules
+
+# Copy application source code
 COPY . .
 
-# Expose the application port
+# Expose port
 EXPOSE 5002
 
-# Start the application
-CMD ["npm", "start"]
+# Start the app
+CMD ["node", "index.js"]
