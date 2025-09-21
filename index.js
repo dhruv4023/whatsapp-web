@@ -105,17 +105,31 @@ async function createSession(clientId) {
                     let message = "Connection closed";
                     if (reason === DisconnectReason.restartRequired || reason === DisconnectReason.streamErrored) {
                         console.log(`🔄 Stream errored. Restarting session for ${clientId}...`);
-                        createSession(clientId).catch(console.error);
+                        (async () => {
+                            sessions[clientId]?.ev.removeAllListeners();
+                            sessions[clientId]?.end();
+                            sessions[clientId] = null;
+                            await createSession(clientId);
+                        })();
                     } else if (reason === DisconnectReason.loggedOut) {
                         deleteCredsFromDb(clientId);
+                        sessions[clientId]?.ev.removeAllListeners();
+                        sessions[clientId]?.end();
+                        sessions[clientId] = null;
                         deleteSessionFiles(`./auth/${clientId}`, true);
                         updateWhatsAppStatus(clientId, "LOGOUT");
                         message = "User logged out. Credentials deleted.";
                     } else if (reason === DisconnectReason.connectionLost) {
                         message = "Connection lost. Please try reconnecting.";
+                        sessions[clientId]?.ev.removeAllListeners();
+                        sessions[clientId]?.end();
+                        sessions[clientId] = null;
                         deleteSessionFiles(`./auth/${clientId}`, true);
                     } else if (reason === DisconnectReason.timedOut) {
                         message = "Connection timed out.";
+                        sessions[clientId]?.ev.removeAllListeners();
+                        sessions[clientId]?.end();
+                        sessions[clientId] = null;
                         deleteSessionFiles(`./auth/${clientId}`, true);
                     }
 
@@ -128,12 +142,15 @@ async function createSession(clientId) {
                     sessions[clientId] = sock;
                     settled = true;
                     updateWhatsAppStatus(clientId, "ACTIVE");
-                    deleteSessionFiles(`./auth/${clientId}`)
                     return resolve({ success: true, message: "Connected", data: {} });
                 }
             });
 
             sock.ev.on('connection.error', (error) => {
+                sessions[clientId]?.ev.removeAllListeners();
+                sessions[clientId]?.end();
+                sessions[clientId] = null;
+                deleteSessionFiles(`./auth/${clientId}`, true);
                 if (!settled) {
                     settled = true;
                     console.error('Connection error:', error);
@@ -166,13 +183,19 @@ app.get('/login/:clientId', async (req, res) => {
     } catch (error) {
         console.error("❌ Session creation failed:", error);
         res.status(500).json(error);
-        deleteSessionFiles(`./auth/${clientId}`)
+        sessions[clientId]?.ev.removeAllListeners();
+        sessions[clientId]?.end();
+        sessions[clientId] = null;
+        deleteSessionFiles(`./auth/${clientId}`, true);
     }
 });
 
 app.get('/logout/:clientId', async (req, res) => {
     const { clientId } = req.params;
     try {
+        sessions[clientId]?.ev.removeAllListeners();
+        sessions[clientId]?.end();
+        sessions[clientId] = null;
         deleteCredsFromDb(clientId);
         updateWhatsAppStatus(clientId, "LOGOUT");
         res.status(200).json({ success: true, message: "Logout successfully!", data: {} });
@@ -213,7 +236,7 @@ app.post('/send/:clientId', upload.single("file"), async (req, res) => {
 
         for (const number of parsedNumbers) {
             const jid = number.endsWith('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`;
-
+            await new Promise(r => setTimeout(r, 100));
             try {
                 let messageOptions = {};
                 if (req.file) {
@@ -274,28 +297,17 @@ app.post('/send/:clientId', upload.single("file"), async (req, res) => {
     }
 });
 
-function deleteSessionFiles(sessionPath, delCreds = false) {
-    if (fs.existsSync(sessionPath)) {
-        fs.readdir(sessionPath, (err, files) => {
-            if (err) {
-                console.error(`Error reading directory ${sessionPath}:`, err);
-                return;
-            }
+async function deleteSessionFiles(sessionPath, delCreds = false) {
+    if (!fs.existsSync(sessionPath)) return;
+    const files = await fs.promises.readdir(sessionPath);
 
-            files.forEach(file => {
-                if (!delCreds && file === 'creds.json') return;
-
-                const filePath = path.join(sessionPath, file);
-
-                fs.rm(filePath, { recursive: true, force: true }, (err) => {
-                    if (err) {
-                        console.error(`Failed to delete ${filePath}:`, err);
-                    }
-                });
-            });
-        });
-    } else {
-        console.log(`Session path ${sessionPath} does not exist.`);
+    for (const file of files) {
+        try {
+            if (!delCreds && file === 'creds.json') continue;
+            await fs.promises.rm(path.join(sessionPath, file), { recursive: true, force: true });
+        } catch (err) {
+            console.error(`Failed to delete ${file}:`, err);
+        }
     }
 }
 
