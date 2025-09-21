@@ -47,43 +47,49 @@ async function createSession(clientId) {
         const { version } = await fetchLatestBaileysVersion();
         const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
 
-        // Optionally load previously saved creds from DB and patch into state
         const credsFromDb = await getCredsFromDb(clientId);
         if (credsFromDb) {
-            Object.assign(state.creds, credsFromDb); // patch only the creds if available
+            Object.assign(state.creds, credsFromDb);
         }
+
+
+
         return new Promise((resolve, reject) => {
+            let settled = false;
+
             const sock = makeWASocket({
-                auth: state, version,
-                syncFullHistory: false,
+                auth: state,
+                version,
+                shouldSyncHistoryMessage: () => false,
                 printQRInTerminal: false,
                 browser: ['MultiClient', 'Chrome', '3.0'],
                 markOnlineOnConnect: false,
                 generateHighQualityLinkPreview: false,
             });
 
-            sock.ev.removeAllListeners("messages.upsert")
-            sock.ev.removeAllListeners("chats.set")
-            sock.ev.removeAllListeners("contacts.set")
+            sock.ev.removeAllListeners("messages.upsert");
+            sock.ev.removeAllListeners("chats.set");
+            sock.ev.removeAllListeners("contacts.set");
 
             sock.ev.on('creds.update', async () => {
                 await saveCreds();
-                await saveToDb(clientId, state.creds); // save only state.creds, not full state
+                await saveToDb(clientId, state.creds);
             });
 
             sock.ev.on('connection.update', async (update) => {
                 const { connection, lastDisconnect, qr } = update;
 
-                if (qr) {
+                if (!settled && qr) {
                     try {
                         const qrBase64 = await qrcode.toDataURL(qr);
-                        // qrcode.generate(qr, {small: true});
+                        settled = true;
                         return resolve({
                             success: true,
                             message: 'QR code generated',
                             data: { qrCode: qrBase64 },
                         });
                     } catch (error) {
+                        settled = true;
                         return reject({
                             success: false,
                             message: 'Failed to generate QR code',
@@ -92,56 +98,51 @@ async function createSession(clientId) {
                     }
                 }
 
-                if (connection === 'close') {
+                if (!settled && connection === 'close') {
                     const reason = lastDisconnect?.error?.output?.statusCode;
                     sessions[clientId] = null;
 
-                    console.log(`Connection for ${clientId} closed. Reason: ${reason === DisconnectReason.loggedOut ? "Logout" : "Other"}`);
-                    if (reason === DisconnectReason.connectionClosed) {
-                        return reject({ success: false, message: "Connection closed by server.", data: {} });
-                    }
-
-                    if (reason === DisconnectReason.connectionLost) {
-                        return reject({ success: false, message: "Connection lost. Please try reconnecting.", data: {} });
-                    }
-
-                    if (reason === DisconnectReason.unavailableService) {
-                        return reject({ success: false, message: "Service unavailable. Please try again later.", data: {} });
-                    }
-                    if (reason === DisconnectReason.loggedOut) {
+                    let message = "Connection closed";
+                    if (reason === DisconnectReason.restartRequired || reason === DisconnectReason.streamErrored) {
+                        console.log(`🔄 Stream errored. Restarting session for ${clientId}...`);
+                        createSession(clientId).catch(console.error);
+                    } else if (reason === DisconnectReason.loggedOut) {
                         deleteCredsFromDb(clientId);
                         deleteSessionFiles(`./auth/${clientId}`, true);
                         updateWhatsAppStatus(clientId, "LOGOUT");
-                        return reject({ success: false, message: "User logged out. Credentials deleted.", data: {} });
+                        message = "User logged out. Credentials deleted.";
+                    } else if (reason === DisconnectReason.connectionLost) {
+                        message = "Connection lost. Please try reconnecting.";
+                        deleteSessionFiles(`./auth/${clientId}`, true);
+                    } else if (reason === DisconnectReason.timedOut) {
+                        message = "Connection timed out.";
+                        deleteSessionFiles(`./auth/${clientId}`, true);
                     }
 
-                    if (reason === DisconnectReason.timedOut) {
-                        return reject({ success: false, message: "Connection timed out.", data: {} });
-                    }
-
-                    if (reason == DisconnectReason.restartRequired) {
-                        createSession(clientId).then(resolve).catch(reject);
-                    }
+                    settled = true;
+                    return reject({ success: false, message, data: {} });
                 }
 
-                if (connection === 'open') {
+                if (!settled && connection === 'open') {
                     console.log(`✅ ${clientId} is connected`);
                     sessions[clientId] = sock;
-
-                    const payload = { success: true, message: "Connected", data: {} };
+                    settled = true;
                     updateWhatsAppStatus(clientId, "ACTIVE");
-                    return resolve(payload);
+                    deleteSessionFiles(`./auth/${clientId}`)
+                    return resolve({ success: true, message: "Connected", data: {} });
                 }
             });
 
             sock.ev.on('connection.error', (error) => {
-                console.error('Connection error:', error);
-                const payload = { success: false, message: "Failed to connect.", data: { error }, };
-                reject(payload);
+                if (!settled) {
+                    settled = true;
+                    console.error('Connection error:', error);
+                    reject({ success: false, message: "Failed to connect.", data: { error } });
+                }
             });
         });
     } catch (error) {
-        console.error(error)
+        console.error(error);
     }
 }
 
@@ -165,8 +166,8 @@ app.get('/login/:clientId', async (req, res) => {
     } catch (error) {
         console.error("❌ Session creation failed:", error);
         res.status(500).json(error);
+        deleteSessionFiles(`./auth/${clientId}`)
     }
-    deleteSessionFiles(`./auth/${clientId}`)
 });
 
 app.get('/logout/:clientId', async (req, res) => {
@@ -190,86 +191,86 @@ app.post('/send/:clientId', upload.single("file"), async (req, res) => {
     const { numbers, message } = req.body;
 
     try {
-        
-    const sock = sessions[clientId];
-    if (!sock) {
-        return res.status(400).json({ error: `Client ${clientId} not connected.` });
-    }
 
-    if (!numbers) {
-        return res.status(400).json({ error: 'numbers (JSON array) are required' });
-    }
+        const sock = sessions[clientId];
+        if (!sock) {
+            return res.status(400).json({ error: `Client ${clientId} not connected.` });
+        }
 
-    let parsedNumbers;
-    try {
-        parsedNumbers = JSON.parse(numbers);
-    } catch (err) {
-        return res.status(400).json({ error: 'numbers must be a valid JSON array' });
-    }
+        if (!numbers) {
+            return res.status(400).json({ error: 'numbers (JSON array) are required' });
+        }
 
-    const failed = [];
-    const sentTo = [];
-
-    for (const number of parsedNumbers) {
-        const jid = number.endsWith('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`;
-
+        let parsedNumbers;
         try {
-            let messageOptions = {};
-            if (req.file) {
-                const fileMime = req.file.mimetype;
-
-                if (fileMime.startsWith("image/")) {
-                    messageOptions = {
-                        image: req.file.buffer,
-                        mimetype: fileMime,
-                        caption: message || ""
-                    };
-                } else if (fileMime.startsWith("video/")) {
-                    messageOptions = {
-                        video: req.file.buffer,
-                        mimetype: fileMime,
-                        caption: message || ""
-                    };
-                } else if (fileMime.startsWith("audio/")) {
-                    messageOptions = {
-                        audio: req.file.buffer,
-                        mimetype: fileMime,
-                        ptt: false // set true if you want it as voice note
-                    };
-                } else {
-                    // default: send as document (PDF, DOCX, ZIP, etc.)
-                    messageOptions = {
-                        document: req.file.buffer,
-                        mimetype: fileMime || 'application/octet-stream',
-                        fileName: req.file.originalname,
-                        caption: message || "📎 Document"
-                    };
-                }
-                await sock.sendMessage(jid, messageOptions);
-                sentTo.push(number);
-            } else {
-                await sock.sendMessage(jid, { text: message });
-                sentTo.push(number)
-            }
+            parsedNumbers = JSON.parse(numbers);
         } catch (err) {
-            console.error(err)
-            console.error(`Failed to send file to ${number}:`, err.message);
-            failed.push(number);
+            return res.status(400).json({ error: 'numbers must be a valid JSON array' });
         }
-    }
 
-    res.status(200).json({
-        status: true,
-        message: `File sent successfully to ${sentTo.length} & failed for ${failed.length}`,
-        data: {
-            succeedNumbers: sentTo,
-            failedNumbers: failed,
+        const failed = [];
+        const sentTo = [];
+
+        for (const number of parsedNumbers) {
+            const jid = number.endsWith('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`;
+
+            try {
+                let messageOptions = {};
+                if (req.file) {
+                    const fileMime = req.file.mimetype;
+
+                    if (fileMime.startsWith("image/")) {
+                        messageOptions = {
+                            image: req.file.buffer,
+                            mimetype: fileMime,
+                            caption: message || ""
+                        };
+                    } else if (fileMime.startsWith("video/")) {
+                        messageOptions = {
+                            video: req.file.buffer,
+                            mimetype: fileMime,
+                            caption: message || ""
+                        };
+                    } else if (fileMime.startsWith("audio/")) {
+                        messageOptions = {
+                            audio: req.file.buffer,
+                            mimetype: fileMime,
+                            ptt: false // set true if you want it as voice note
+                        };
+                    } else {
+                        // default: send as document (PDF, DOCX, ZIP, etc.)
+                        messageOptions = {
+                            document: req.file.buffer,
+                            mimetype: fileMime || 'application/octet-stream',
+                            fileName: req.file.originalname,
+                            caption: message || "📎 Document"
+                        };
+                    }
+                    await sock.sendMessage(jid, messageOptions);
+                    sentTo.push(number);
+                } else {
+                    await sock.sendMessage(jid, { text: message });
+                    sentTo.push(number)
+                }
+            } catch (err) {
+                console.error(err)
+                console.error(`Failed to send file to ${number}:`, err.message);
+                failed.push(number);
+            }
         }
-    });
+
+        res.status(200).json({
+            status: true,
+            message: `File sent successfully to ${sentTo.length} & failed for ${failed.length}`,
+            data: {
+                succeedNumbers: sentTo,
+                failedNumbers: failed,
+            }
+        });
 
     } catch (error) {
         console.error("❌ Sending file failed:", error);
-        res.status(500).json({ success: false, message: "Failed to send file.", data: { error } });   
+        res.status(500).json({ success: false, message: "Failed to send file.", data: { error } });
     }
 });
 
