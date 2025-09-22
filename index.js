@@ -46,11 +46,11 @@ async function createSession(clientId) {
 
         const { version } = await fetchLatestBaileysVersion();
         const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-
-        const credsFromDb = await getCredsFromDb(clientId);
-        if (credsFromDb) {
-            Object.assign(state.creds, credsFromDb);
-        }
+        console.log(state)
+        // const credsFromDb = await getCredsFromDb(clientId);
+        // if (credsFromDb) {
+        //     Object.assign(state.creds, credsFromDb);
+        // }
 
 
 
@@ -73,7 +73,7 @@ async function createSession(clientId) {
 
             sock.ev.on('creds.update', async () => {
                 await saveCreds();
-                await saveToDb(clientId, state.creds);
+                // await saveToDb(clientId, state.creds);
             });
 
             sock.ev.on('connection.update', async (update) => {
