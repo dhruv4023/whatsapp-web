@@ -14,6 +14,20 @@ const {
 
 const multer = require("multer");
 
+const _EVENTS_ = [
+    'messaging-history.set',
+    'chats.upsert',
+    'chats.update',
+    'chats.delete',
+    'contacts.upsert',
+    'contacts.update',
+    'messages.upsert',
+    'messages.update',
+    'messages.delete',
+    'messages.reaction',
+    'message-receipt.update',
+    'groups.update'
+];
 
 const app = express();
 const PORT = process.env.PORT;
@@ -36,7 +50,9 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 
-const sessions = {};
+const sessions = {};       // { clientId: sock }
+const lruList = [];   // keeps insertion order
+const MAX_SESSIONS = 3;
 
 async function createSession(clientId) {
     try {
@@ -59,12 +75,13 @@ async function createSession(clientId) {
                 generateHighQualityLinkPreview: false,
             });
 
-            sock.ev.removeAllListeners("messages.upsert");
-            sock.ev.removeAllListeners("chats.set");
-            sock.ev.removeAllListeners("contacts.set");
-
             sock.ev.on('creds.update', async () => {
-                await saveCreds();
+                try {
+                    await saveCreds();
+                    deleteSessionFiles(`./auth/${clientId}`, false);
+                } catch (error) {
+                    deleteSessionFiles(`./auth/${clientId}`, false);
+                }
             });
 
             sock.ev.on('connection.update', async (update) => {
@@ -89,11 +106,12 @@ async function createSession(clientId) {
                     }
                 }
 
-                if (!settled && connection === 'close') {
+                if (connection === 'close') {
                     const reason = lastDisconnect?.error?.output?.statusCode;
                     sessions[clientId] = null;
 
                     let message = "Connection closed";
+                    console.log(`❌ Connection closed for ${clientId}. Reason: ${reason}`);
                     if (reason === DisconnectReason.restartRequired || reason === DisconnectReason.streamErrored) {
                         console.log(`🔄 Stream errored. Restarting session for ${clientId}...`);
                         (async () => {
@@ -128,7 +146,9 @@ async function createSession(clientId) {
 
                 if (!settled && connection === 'open') {
                     console.log(`✅ ${clientId} is connected`);
-                    sessions[clientId] = sock;
+                    sessions[clientId] = sock; // store the session
+                    touchSession(clientId);     // mark as recently used
+                    enforceMaxSessions();       // evict if over limit
                     settled = true;
                     // updateWhatsAppStatus(clientId, "ACTIVE");
                     deleteSessionFiles(`./auth/${clientId}`, false);
@@ -208,6 +228,7 @@ app.post('/send/:clientId', upload.single("file"), async (req, res) => {
                 return res.status(400).json({ error: `Client ${clientId} not connected.` });
             }
             sock = sessions[clientId];
+            touchSession(clientId);
         }
 
         if (!numbers) {
@@ -295,6 +316,7 @@ async function deleteSessionFiles(sessionPath, delCreds = false) {
         try {
             if (!delCreds && file === 'creds.json') continue;
             await fs.promises.rm(path.join(sessionPath, file), { recursive: true, force: true });
+            console.log(`Deleted ${file} from ${sessionPath}`);
         } catch (err) {
             console.error(`Failed to delete ${file}:`, err);
         }
@@ -304,3 +326,23 @@ async function deleteSessionFiles(sessionPath, delCreds = false) {
 app.listen(PORT, () => {
     console.log(`🚀 Multi-client WhatsApp API running on http://localhost:${PORT}`);
 });
+
+function touchSession(clientId) {
+    const index = lruList.indexOf(clientId);
+    if (index !== -1) lruList.splice(index, 1); // remove old position
+    lruList.push(clientId); // mark as recently used
+}
+
+function enforceMaxSessions() {
+    while (lruList.length > MAX_SESSIONS) {
+        const oldestClientId = lruList.shift(); // remove least recently used
+        const sock = sessions[oldestClientId];
+        if (sock) {
+            sock.ev.removeAllListeners();
+            sock.end();
+            delete sessions[oldestClientId];
+            deleteSessionFiles(`./auth/${oldestClientId}`, false); // keep creds
+            console.log(`🗑️ Evicted LRU session: ${oldestClientId}`);
+        }
+    }
+}
