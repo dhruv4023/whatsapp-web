@@ -11,7 +11,6 @@ const {
     fetchLatestBaileysVersion,
     DisconnectReason,
 } = require('@whiskeysockets/baileys');
-const { saveToDb, getCredsFromDb, deleteCredsFromDb, initDb, updateWhatsAppStatus } = require('./db');
 
 const multer = require("multer");
 
@@ -46,13 +45,6 @@ async function createSession(clientId) {
 
         const { version } = await fetchLatestBaileysVersion();
         const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-        console.log(state)
-        // const credsFromDb = await getCredsFromDb(clientId);
-        // if (credsFromDb) {
-        //     Object.assign(state.creds, credsFromDb);
-        // }
-
-
 
         return new Promise((resolve, reject) => {
             let settled = false;
@@ -73,7 +65,6 @@ async function createSession(clientId) {
 
             sock.ev.on('creds.update', async () => {
                 await saveCreds();
-                // await saveToDb(clientId, state.creds);
             });
 
             sock.ev.on('connection.update', async (update) => {
@@ -112,12 +103,10 @@ async function createSession(clientId) {
                             await createSession(clientId);
                         })();
                     } else if (reason === DisconnectReason.loggedOut) {
-                        deleteCredsFromDb(clientId);
                         sessions[clientId]?.ev.removeAllListeners();
                         sessions[clientId]?.end();
                         sessions[clientId] = null;
                         deleteSessionFiles(`./auth/${clientId}`, true);
-                        updateWhatsAppStatus(clientId, "LOGOUT");
                         message = "User logged out. Credentials deleted.";
                     } else if (reason === DisconnectReason.connectionLost) {
                         message = "Connection lost. Please try reconnecting.";
@@ -141,7 +130,8 @@ async function createSession(clientId) {
                     console.log(`✅ ${clientId} is connected`);
                     sessions[clientId] = sock;
                     settled = true;
-                    updateWhatsAppStatus(clientId, "ACTIVE");
+                    // updateWhatsAppStatus(clientId, "ACTIVE");
+                    deleteSessionFiles(`./auth/${clientId}`, false);
                     return resolve({ success: true, message: "Connected", data: {} });
                 }
             });
@@ -196,14 +186,12 @@ app.get('/logout/:clientId', async (req, res) => {
         sessions[clientId]?.ev.removeAllListeners();
         sessions[clientId]?.end();
         sessions[clientId] = null;
-        deleteCredsFromDb(clientId);
-        updateWhatsAppStatus(clientId, "LOGOUT");
+        deleteSessionFiles(`./auth/${clientId}`, true)
         res.status(200).json({ success: true, message: "Logout successfully!", data: {} });
     } catch (error) {
         console.error("❌ Session creation failed:", error);
         res.status(500).json(error);
     }
-    deleteSessionFiles(`./auth/${clientId}`, true)
 });
 
 const upload = multer({ storage: multer.memoryStorage() });
@@ -212,12 +200,14 @@ const upload = multer({ storage: multer.memoryStorage() });
 app.post('/send/:clientId', upload.single("file"), async (req, res) => {
     const { clientId } = req.params;
     const { numbers, message } = req.body;
-
     try {
-
-        const sock = sessions[clientId];
+        let sock = sessions[clientId];
         if (!sock) {
-            return res.status(400).json({ error: `Client ${clientId} not connected.` });
+            const { success } = await createSession(clientId)
+            if (!success) {
+                return res.status(400).json({ error: `Client ${clientId} not connected.` });
+            }
+            sock = sessions[clientId];
         }
 
         if (!numbers) {
@@ -281,7 +271,7 @@ app.post('/send/:clientId', upload.single("file"), async (req, res) => {
                 failed.push(number);
             }
         }
-
+        deleteSessionFiles(`./auth/${clientId}`, false);
         res.status(200).json({
             status: true,
             message: `File sent successfully to ${sentTo.length} & failed for ${failed.length}`,
@@ -312,6 +302,5 @@ async function deleteSessionFiles(sessionPath, delCreds = false) {
 }
 
 app.listen(PORT, () => {
-    initDb()
     console.log(`🚀 Multi-client WhatsApp API running on http://localhost:${PORT}`);
 });
