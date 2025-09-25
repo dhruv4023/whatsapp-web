@@ -280,10 +280,11 @@ app.post('/send/:clientId', upload.single("file"), async (req, res) => {
             } catch (err) {
                 console.error(`Failed to send to ${number}:`, err.message);
                 failed.push(number);
+                throw err;
             }
         }
 
-        res.json({ success: true, sentTo, failed });
+        res.json({ success: failed.length === 0, sentTo, failed });
     } catch (error) {
         console.error("❌ Sending failed:", error);
         res.status(500).json({ success: false, message: error.message || "Internal server error" });
