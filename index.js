@@ -53,6 +53,8 @@ app.use(cors(corsOptions));
 const sessions = {};       // { clientId: sock }
 const lruList = [];   // keeps insertion order
 const MAX_SESSIONS = 3;
+const sessionTimers = {};
+const SESSION_IDLE_TIME = 1 * 60 * 1000;
 
 async function createSession(clientId) {
     try {
@@ -305,6 +307,8 @@ app.post('/send/:clientId', upload.single("file"), async (req, res) => {
     } catch (error) {
         console.error("❌ Sending file failed:", error);
         res.status(500).json({ success: false, message: "Failed to send file.", data: { error } });
+    } finally {
+        scheduleSessionCleanup(clientId);
     }
 });
 
@@ -344,5 +348,29 @@ function enforceMaxSessions() {
             deleteSessionFiles(`./auth/${oldestClientId}`, false); // keep creds
             console.log(`🗑️ Evicted LRU session: ${oldestClientId}`);
         }
+    }
+}
+
+
+function scheduleSessionCleanup(clientId) {
+    // Clear any existing timer
+    try {
+        if (sessionTimers[clientId]) clearTimeout(sessionTimers[clientId]);
+    
+        // Schedule new cleanup
+        sessionTimers[clientId] = setTimeout(() => {
+            const sock = sessions[clientId];
+            if (sock) {
+                console.log(`🗑️ Closing idle session: ${clientId}`);
+                sock.ev.removeAllListeners();
+                sock.end();
+                delete sessions[clientId];
+                deleteSessionFiles(`./auth/${clientId}`, false); // keep creds
+                touchSession(clientId, true); // optional: remove from LRU list immediately
+            }
+            delete sessionTimers[clientId]; // clean up timer reference
+        }, SESSION_IDLE_TIME);
+    } catch (error) {
+        console.error("error in scheduleSessionCleanup", error)
     }
 }
