@@ -45,16 +45,22 @@ function touchSession(clientId) {
 }
 
 function enforceMaxSessions() {
-    while (lruList.length > MAX_SESSIONS) {
-        const oldestClientId = lruList.shift();
-        const sock = sessions[oldestClientId];
-        if (sock) {
-            sock.ev.removeAllListeners();
-            sock.end();
-            delete sessions[oldestClientId];
-            deleteSessionFiles(`./auth/${oldestClientId}`, false);
-            console.log(`🗑️ Evicted LRU session: ${oldestClientId}`);
+    try {
+        while (lruList.length > MAX_SESSIONS) {
+            const oldestClientId = lruList.shift();
+            const sock = sessions[oldestClientId];
+            if (sock) {
+                sock.ev.removeAllListeners();
+                sock.end();
+                clearTimeout(sessionTimers[oldestClientId]);
+                delete sessionTimers[oldestClientId];
+                delete sessions[oldestClientId];
+                deleteSessionFiles(`./auth/${oldestClientId}`, false);
+                console.log(`🗑️ Evicted LRU session: ${oldestClientId}`);
+            }
         }
+    } catch (error) {
+        console.error("Error in enforceMaxSessions", error);
     }
 }
 
@@ -150,7 +156,7 @@ async function createSession(clientId) {
 
                     sessions[clientId]?.ev.removeAllListeners();
                     sessions[clientId]?.end();
-                    sessions[clientId] = null;
+                    delete sessions[clientId];
 
                     if (reason === DisconnectReason.restartRequired || reason === DisconnectReason.streamErrored) {
                         console.log(`🔄 Restarting session for ${clientId}...`);
@@ -247,6 +253,11 @@ app.post('/send/:clientId', upload.single("file"), async (req, res) => {
             if (!success) return res.status(400).json({ error: `Client ${clientId} not connected.` });
             sock = sessions[clientId];
         }
+        scheduleSessionCleanup(clientId);
+        touchSession(clientId);
+
+        if (!numbers) return res.status(400).json({ error: "Numbers are required" });
+        if (!message && !req.file) return res.status(400).json({ error: "Message or file is required" });
 
         const parsedNumbers = JSON.parse(numbers || '[]');
         const failed = [];
@@ -275,9 +286,7 @@ app.post('/send/:clientId', upload.single("file"), async (req, res) => {
         res.json({ success: true, sentTo, failed });
     } catch (error) {
         console.error("❌ Sending failed:", error);
-        res.status(500).json({ success: false, error });
-    } finally {
-        scheduleSessionCleanup(clientId);
+        res.status(500).json({ success: false, message: error.message || "Internal server error" });
     }
 });
 
