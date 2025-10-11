@@ -6,3 +6,4 @@ auth
 auth.tmp
 package-lock.json
 dist
+*.log
