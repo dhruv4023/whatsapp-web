@@ -1,10 +1,10 @@
 const express = require('express');
 const cors = require('cors');
-require('dotenv').config()
-// const qrcode = require('qrcode-terminal');
+require('dotenv').config();
 const qrcode = require('qrcode');
 const fs = require('fs');
-const path = require('path')
+const path = require('path');
+const multer = require("multer");
 const {
     default: makeWASocket,
     useMultiFileAuthState,
@@ -12,50 +12,86 @@ const {
     DisconnectReason,
 } = require('@whiskeysockets/baileys');
 
-const multer = require("multer");
-
-const _EVENTS_ = [
-    'messaging-history.set',
-    'chats.upsert',
-    'chats.update',
-    'chats.delete',
-    'contacts.upsert',
-    'contacts.update',
-    'messages.upsert',
-    'messages.update',
-    'messages.delete',
-    'messages.reaction',
-    'message-receipt.update',
-    'groups.update'
-];
-
 const app = express();
-const PORT = process.env.PORT;
+const PORT = process.env.PORT || 3000;
+
 app.use(express.json());
 
+// ✅ Secure, controlled CORS setup
 const corsOptions = {
     origin: function (origin, callback) {
-        const allowedOrigins = JSON.parse(process.env.ORIGIN_URL_LIST);
-        if (allowedOrigins.includes(origin) || !origin) {
-            callback(null, true);
-        } else {
-            callback(new Error('Not allowed by CORS'));
-        }
+        const allowedOrigins = JSON.parse(process.env.ORIGIN_URL_LIST || '["http://localhost:3000"]');
+        if (allowedOrigins.includes(origin) || !origin) callback(null, true);
+        else callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
     allowedHeaders: ["Authorization", "Content-Type"],
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
 };
-
 app.use(cors(corsOptions));
 
-
-const sessions = {};       // { clientId: sock }
-const lruList = [];   // keeps insertion order
+// ✅ Globals
+const sessions = {};
+const lruList = [];
 const MAX_SESSIONS = 3;
 const sessionTimers = {};
 const SESSION_IDLE_TIME = 1 * 60 * 1000;
 
+// ✅ Helper functions
+function touchSession(clientId) {
+    const index = lruList.indexOf(clientId);
+    if (index !== -1) lruList.splice(index, 1);
+    lruList.push(clientId);
+}
+
+function enforceMaxSessions() {
+    while (lruList.length > MAX_SESSIONS) {
+        const oldestClientId = lruList.shift();
+        const sock = sessions[oldestClientId];
+        if (sock) {
+            sock.ev.removeAllListeners();
+            sock.end();
+            delete sessions[oldestClientId];
+            deleteSessionFiles(`./auth/${oldestClientId}`, false);
+            console.log(`🗑️ Evicted LRU session: ${oldestClientId}`);
+        }
+    }
+}
+
+function scheduleSessionCleanup(clientId) {
+    try {
+        if (sessionTimers[clientId]) clearTimeout(sessionTimers[clientId]);
+        sessionTimers[clientId] = setTimeout(() => {
+            const sock = sessions[clientId];
+            if (sock) {
+                console.log(`🗑️ Closing idle session: ${clientId}`);
+                sock.ev.removeAllListeners();
+                sock.end();
+                delete sessions[clientId];
+                deleteSessionFiles(`./auth/${clientId}`, false);
+            }
+            delete sessionTimers[clientId];
+        }, SESSION_IDLE_TIME);
+    } catch (error) {
+        console.error("Error in scheduleSessionCleanup", error);
+    }
+}
+
+async function deleteSessionFiles(sessionPath, delCreds = false) {
+    try {
+        if (!fs.existsSync(sessionPath)) return;
+        const files = await fs.promises.readdir(sessionPath);
+        for (const file of files) {
+            if (!delCreds && file === 'creds.json') continue;
+            await fs.promises.rm(path.join(sessionPath, file), { recursive: true, force: true });
+            console.log(`Deleted ${file} from ${sessionPath}`);
+        }
+    } catch (err) {
+        console.error(`Failed to delete session files in ${sessionPath}:`, err);
+    }
+}
+
+// ✅ Create WhatsApp Session
 async function createSession(clientId) {
     try {
         const sessionPath = `./auth/${clientId}`;
@@ -80,9 +116,9 @@ async function createSession(clientId) {
             sock.ev.on('creds.update', async () => {
                 try {
                     await saveCreds();
-                    deleteSessionFiles(`./auth/${clientId}`, false);
+                    deleteSessionFiles(sessionPath, false);
                 } catch (error) {
-                    deleteSessionFiles(`./auth/${clientId}`, false);
+                    console.error("Error saving creds:", error);
                 }
             });
 
@@ -110,84 +146,53 @@ async function createSession(clientId) {
 
                 if (connection === 'close') {
                     const reason = lastDisconnect?.error?.output?.statusCode;
+                    console.log(`❌ Connection closed for ${clientId}. Reason: ${reason}`);
+
+                    sessions[clientId]?.ev.removeAllListeners();
+                    sessions[clientId]?.end();
                     sessions[clientId] = null;
 
-                    let message = "Connection closed";
-                    console.log(`❌ Connection closed for ${clientId}. Reason: ${reason}`);
                     if (reason === DisconnectReason.restartRequired || reason === DisconnectReason.streamErrored) {
-                        console.log(`🔄 Stream errored. Restarting session for ${clientId}...`);
-                        (async () => {
-                            sessions[clientId]?.ev.removeAllListeners();
-                            sessions[clientId]?.end();
-                            sessions[clientId] = null;
-                            await createSession(clientId);
-                        })();
-                    } else if (reason === DisconnectReason.loggedOut) {
-                        sessions[clientId]?.ev.removeAllListeners();
-                        sessions[clientId]?.end();
-                        sessions[clientId] = null;
-                        deleteSessionFiles(`./auth/${clientId}`, true);
-                        message = "User logged out. Credentials deleted.";
-                    } else if (reason === DisconnectReason.connectionLost) {
-                        message = "Connection lost. Please try reconnecting.";
-                        sessions[clientId]?.ev.removeAllListeners();
-                        sessions[clientId]?.end();
-                        sessions[clientId] = null;
-                        deleteSessionFiles(`./auth/${clientId}`, true);
-                    } else if (reason === DisconnectReason.timedOut) {
-                        message = "Connection timed out.";
-                        sessions[clientId]?.ev.removeAllListeners();
-                        sessions[clientId]?.end();
-                        sessions[clientId] = null;
-                        deleteSessionFiles(`./auth/${clientId}`, true);
+                        console.log(`🔄 Restarting session for ${clientId}...`);
+                        await createSession(clientId);
+                    } else {
+                        deleteSessionFiles(sessionPath, true);
                     }
 
                     settled = true;
-                    return reject({ success: false, message, data: {} });
+                    return reject({ success: false, message: "Connection closed", data: {} });
                 }
 
                 if (!settled && connection === 'open') {
-                    console.log(`✅ ${clientId} is connected`);
-                    sessions[clientId] = sock; // store the session
-                    touchSession(clientId);     // mark as recently used
-                    enforceMaxSessions();       // evict if over limit
+                    console.log(`✅ ${clientId} connected`);
+                    sessions[clientId] = sock;
+                    touchSession(clientId);
+                    enforceMaxSessions();
+                    deleteSessionFiles(sessionPath, false);
                     settled = true;
-                    // updateWhatsAppStatus(clientId, "ACTIVE");
-                    deleteSessionFiles(`./auth/${clientId}`, false);
                     return resolve({ success: true, message: "Connected", data: {} });
                 }
             });
 
             sock.ev.on('connection.error', (error) => {
+                console.error('Connection error:', error);
                 sessions[clientId]?.ev.removeAllListeners();
                 sessions[clientId]?.end();
                 sessions[clientId] = null;
-                deleteSessionFiles(`./auth/${clientId}`, true);
-                if (!settled) {
-                    settled = true;
-                    console.error('Connection error:', error);
-                    reject({ success: false, message: "Failed to connect.", data: { error } });
-                }
+                deleteSessionFiles(sessionPath, true);
+                if (!settled) reject({ success: false, message: "Failed to connect", data: { error } });
             });
         });
     } catch (error) {
-        console.error(error);
+        console.error("Error in createSession:", error);
     }
 }
 
-
-
-// 👤 Login route to initiate QR for a client
+// ✅ Routes
 app.get('/login/:clientId', async (req, res) => {
     const { clientId } = req.params;
     if (sessions[clientId]) {
-        return res.json({
-            success: true, data: [
-                {
-                    "webWhatsAppStatus": "ACTIVE"
-                }
-            ], message: `You are already connected.`
-        });
+        return res.json({ success: true, data: [{ webWhatsAppStatus: "ACTIVE" }], message: "Already connected" });
     }
     try {
         const response = await createSession(clientId);
@@ -195,12 +200,26 @@ app.get('/login/:clientId', async (req, res) => {
     } catch (error) {
         console.error("❌ Session creation failed:", error);
         res.status(500).json(error);
-        sessions[clientId]?.ev.removeAllListeners();
-        sessions[clientId]?.end();
-        sessions[clientId] = null;
-        deleteSessionFiles(`./auth/${clientId}`, true);
     }
 });
+
+app.get('/status/:clientId', async (req, res) => {
+    const { clientId } = req.params;
+    try {
+        const sock = sessions[clientId];
+        if (sock) {
+            touchSession(clientId);
+            scheduleSessionCleanup(clientId);
+            return res.status(200).json({ success: true, data: [{ webWhatsAppStatus: "ACTIVE" }], message: "Client is connected" });
+        } else {
+            return res.status(400).json({ success: true, data: [{ webWhatsAppStatus: "INACTIVE" }], message: "Client is not connected" });
+        }
+    } catch (error) {
+        console.error("❌ Status check failed:", error);
+        res.status(500).json({ success: false, error });
+    }
+});
+
 
 app.get('/logout/:clientId', async (req, res) => {
     const { clientId } = req.params;
@@ -208,169 +227,91 @@ app.get('/logout/:clientId', async (req, res) => {
         sessions[clientId]?.ev.removeAllListeners();
         sessions[clientId]?.end();
         sessions[clientId] = null;
-        deleteSessionFiles(`./auth/${clientId}`, true)
-        res.status(200).json({ success: true, message: "Logout successfully!", data: {} });
+        deleteSessionFiles(`./auth/${clientId}`, true);
+        res.json({ success: true, message: "Logout successful" });
     } catch (error) {
-        console.error("❌ Session creation failed:", error);
-        res.status(500).json(error);
+        console.error("Logout failed:", error);
+        res.status(500).json({ success: false, error });
     }
 });
 
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } });
 
-// Universal file send (PDF, Image, Video, Audio, etc.)
 app.post('/send/:clientId', upload.single("file"), async (req, res) => {
     const { clientId } = req.params;
     const { numbers, message } = req.body;
     try {
         let sock = sessions[clientId];
         if (!sock) {
-            const { success } = await createSession(clientId)
-            if (!success) {
-                return res.status(400).json({ error: `Client ${clientId} not connected.` });
-            }
+            const { success } = await createSession(clientId);
+            if (!success) return res.status(400).json({ error: `Client ${clientId} not connected.` });
             sock = sessions[clientId];
-            touchSession(clientId);
         }
 
-        if (!numbers) {
-            return res.status(400).json({ error: 'numbers (JSON array) are required' });
-        }
-
-        let parsedNumbers;
-        try {
-            parsedNumbers = JSON.parse(numbers);
-        } catch (err) {
-            return res.status(400).json({ error: 'numbers must be a valid JSON array' });
-        }
-
+        const parsedNumbers = JSON.parse(numbers || '[]');
         const failed = [];
         const sentTo = [];
 
         for (const number of parsedNumbers) {
             const jid = number.endsWith('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`;
-            await new Promise(r => setTimeout(r, 100));
             try {
-                let messageOptions = {};
                 if (req.file) {
-                    const fileMime = req.file.mimetype;
-
-                    if (fileMime.startsWith("image/")) {
-                        messageOptions = {
-                            image: req.file.buffer,
-                            mimetype: fileMime,
-                            caption: message || ""
-                        };
-                    } else if (fileMime.startsWith("video/")) {
-                        messageOptions = {
-                            video: req.file.buffer,
-                            mimetype: fileMime,
-                            caption: message || ""
-                        };
-                    } else if (fileMime.startsWith("audio/")) {
-                        messageOptions = {
-                            audio: req.file.buffer,
-                            mimetype: fileMime,
-                            ptt: false // set true if you want it as voice note
-                        };
-                    } else {
-                        // default: send as document (PDF, DOCX, ZIP, etc.)
-                        messageOptions = {
-                            document: req.file.buffer,
-                            mimetype: fileMime || 'application/octet-stream',
-                            fileName: req.file.originalname,
-                            caption: message || "📎 Document"
-                        };
-                    }
-                    await sock.sendMessage(jid, messageOptions);
-                    sentTo.push(number);
-                } else {
-                    await sock.sendMessage(jid, { text: message });
-                    sentTo.push(number)
-                }
+                    const mime = req.file.mimetype;
+                    const buf = req.file.buffer;
+                    let msg = {};
+                    if (mime.startsWith("image/")) msg = { image: buf, mimetype: mime, caption: message || "" };
+                    else if (mime.startsWith("video/")) msg = { video: buf, mimetype: mime, caption: message || "" };
+                    else if (mime.startsWith("audio/")) msg = { audio: buf, mimetype: mime };
+                    else msg = { document: buf, mimetype: mime, fileName: req.file.originalname };
+                    await sock.sendMessage(jid, msg);
+                } else await sock.sendMessage(jid, { text: message });
+                sentTo.push(number);
             } catch (err) {
-                console.error(err)
-                console.error(`Failed to send file to ${number}:`, err.message);
+                console.error(`Failed to send to ${number}:`, err.message);
                 failed.push(number);
             }
         }
-        deleteSessionFiles(`./auth/${clientId}`, false);
-        res.status(200).json({
-            status: true,
-            message: `File sent successfully to ${sentTo.length} & failed for ${failed.length}`,
-            data: {
-                succeedNumbers: sentTo,
-                failedNumbers: failed,
-            }
-        });
 
+        res.json({ success: true, sentTo, failed });
     } catch (error) {
-        console.error("❌ Sending file failed:", error);
-        res.status(500).json({ success: false, message: "Failed to send file.", data: { error } });
+        console.error("❌ Sending failed:", error);
+        res.status(500).json({ success: false, error });
     } finally {
         scheduleSessionCleanup(clientId);
     }
 });
 
-async function deleteSessionFiles(sessionPath, delCreds = false) {
-    if (!fs.existsSync(sessionPath)) return;
-    const files = await fs.promises.readdir(sessionPath);
+// ✅ Robust Global Error Handlers
+process.on('uncaughtException', (err) => {
+    console.error('🔥 Uncaught Exception:', err);
+    restartService();
+});
 
-    for (const file of files) {
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('🔥 Unhandled Rejection:', reason);
+    restartService();
+});
+
+process.on('SIGINT', () => {
+    console.log("🛑 Gracefully shutting down...");
+    Object.keys(sessions).forEach(id => {
+        sessions[id]?.ev.removeAllListeners();
+        sessions[id]?.end();
+    });
+    process.exit(0);
+});
+
+function restartService() {
+    console.log('♻️ Restarting service due to critical failure...');
+    Object.keys(sessions).forEach(id => {
         try {
-            if (!delCreds && file === 'creds.json') continue;
-            await fs.promises.rm(path.join(sessionPath, file), { recursive: true, force: true });
-            console.log(`Deleted ${file} from ${sessionPath}`);
-        } catch (err) {
-            console.error(`Failed to delete ${file}:`, err);
-        }
-    }
+            sessions[id]?.ev.removeAllListeners();
+            sessions[id]?.end();
+        } catch (_) { }
+    });
+    setTimeout(() => process.exit(1), 1000); // will restart if using PM2 or wrapper
 }
 
 app.listen(PORT, () => {
     console.log(`🚀 Multi-client WhatsApp API running on http://localhost:${PORT}`);
 });
-
-function touchSession(clientId) {
-    const index = lruList.indexOf(clientId);
-    if (index !== -1) lruList.splice(index, 1); // remove old position
-    lruList.push(clientId); // mark as recently used
-}
-
-function enforceMaxSessions() {
-    while (lruList.length > MAX_SESSIONS) {
-        const oldestClientId = lruList.shift(); // remove least recently used
-        const sock = sessions[oldestClientId];
-        if (sock) {
-            sock.ev.removeAllListeners();
-            sock.end();
-            delete sessions[oldestClientId];
-            deleteSessionFiles(`./auth/${oldestClientId}`, false); // keep creds
-            console.log(`🗑️ Evicted LRU session: ${oldestClientId}`);
-        }
-    }
-}
-
-
-function scheduleSessionCleanup(clientId) {
-    // Clear any existing timer
-    try {
-        if (sessionTimers[clientId]) clearTimeout(sessionTimers[clientId]);
-    
-        // Schedule new cleanup
-        sessionTimers[clientId] = setTimeout(() => {
-            const sock = sessions[clientId];
-            if (sock) {
-                console.log(`🗑️ Closing idle session: ${clientId}`);
-                sock.ev.removeAllListeners();
-                sock.end();
-                delete sessions[clientId];
-                deleteSessionFiles(`./auth/${clientId}`, false); // keep creds
-                touchSession(clientId, true); // optional: remove from LRU list immediately
-            }
-            delete sessionTimers[clientId]; // clean up timer reference
-        }, SESSION_IDLE_TIME);
-    } catch (error) {
-        console.error("error in scheduleSessionCleanup", error)
-    }
-}
