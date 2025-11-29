@@ -1,27 +1,26 @@
 # Stage 1: Install dependencies
 FROM node:22-alpine AS deps
 
-# Set working directory
 WORKDIR /usr/src/app
 
-# Copy package files and install only production deps
 COPY package*.json ./
 RUN npm ci --only=production
-RUN npm install -g pm2
 
-# Stage 2: Copy app and dependencies into minimal image
+# install pm2 & pm2-runtime here OR in runtime stage
+RUN npm install -g pm2 pm2-runtime
+
+
+# Stage 2: Runtime
 FROM node:22-alpine AS runtime
 
 WORKDIR /usr/src/app
 
-# Copy only production node_modules from previous stage
-COPY --from=deps /usr/src/app/node_modules ./node_modules
+# Install global pm2 & pm2-runtime again (needed!)
+RUN npm install -g pm2 pm2-runtime
 
-# Copy application source code
+COPY --from=deps /usr/src/app/node_modules ./node_modules
 COPY . .
 
-# Expose port
 EXPOSE 5002
 
-# Start the app
 CMD ["pm2-runtime", "ecosystem.config.js", "--env", "production"]

@@ -33,9 +33,9 @@ app.use(cors(corsOptions));
 // ✅ Globals
 const sessions = {};
 const lruList = [];
-const MAX_SESSIONS = 3;
+const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS || '3', 10);
 const sessionTimers = {};
-const SESSION_IDLE_TIME = 1 * 60 * 1000;
+const SESSION_IDLE_TIME = parseInt(process.env.SESSION_IDLE_TIME || String(1 * 60 * 1000), 10);
 
 // ✅ Helper functions
 function touchSession(clientId) {
@@ -101,7 +101,7 @@ async function deleteSessionFiles(sessionPath, delCreds = false) {
 async function createSession(clientId) {
     try {
         const sessionPath = `./auth/${clientId}`;
-        fs.mkdirSync(sessionPath, { recursive: true });
+        await fs.promises.mkdir(sessionPath, { recursive: true }); // Use async mkdir
 
         const { version } = await fetchLatestBaileysVersion();
         const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
@@ -122,7 +122,6 @@ async function createSession(clientId) {
             sock.ev.on('creds.update', async () => {
                 try {
                     await saveCreds();
-                    deleteSessionFiles(sessionPath, false);
                 } catch (error) {
                     console.error("Error saving creds:", error);
                 }
@@ -174,7 +173,6 @@ async function createSession(clientId) {
                     sessions[clientId] = sock;
                     touchSession(clientId);
                     enforceMaxSessions();
-                    deleteSessionFiles(sessionPath, false);
                     settled = true;
                     return resolve({ success: true, message: "Connected", data: {} });
                 }
@@ -252,6 +250,7 @@ app.post('/send/:clientId', upload.single("file"), async (req, res) => {
             const { success } = await createSession(clientId);
             if (!success) return res.status(400).json({ error: `Client ${clientId} not connected.` });
             sock = sessions[clientId];
+            if (!sock) return res.status(400).json({ error: `Client ${clientId} not connected.` });
         }
         scheduleSessionCleanup(clientId);
         touchSession(clientId);
@@ -280,7 +279,6 @@ app.post('/send/:clientId', upload.single("file"), async (req, res) => {
             } catch (err) {
                 console.error(`Failed to send to ${number}:`, err.message);
                 failed.push(number);
-                throw err;
             }
         }
 

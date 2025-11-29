@@ -6,7 +6,7 @@ module.exports = {
       instances: 1,                  // or "max" for multi-core
       autorestart: true,             // restart on crash/exit
       watch: false,                  // set true for dev auto-reload
-      max_memory_restart: "500M",    // restart if memory > 500MB
+      max_memory_restart: "300M",    // restart if memory > 500MB
       env: {
         NODE_ENV: "development",
         PORT: 5002
