@@ -5,6 +5,7 @@ const qrcode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 const multer = require("multer");
+
 const {
     default: makeWASocket,
     useMultiFileAuthState,
@@ -26,203 +27,252 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 let sock = null;
+let currentClientId = null;   // Track current active client
 
-// ✅ Create WhatsApp Session
-async function createSession(clientId) {
-    try {
-        const sessionPath = `./auth/${clientId}`;
-        const existingClient = getExistingClient();
 
-        if (existingClient && existingClient !== clientId) {
-            throw new Error(`Another client already exists: ${existingClient}`);
-        }
+const MAX_RETRIES = 5;
+let isReconnecting = false;
 
-        fs.mkdirSync(sessionPath, { recursive: true });
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+});
 
-        const { version } = await fetchLatestBaileysVersion();
-        const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+const getSessionPath = (clientId) => path.join(__dirname, 'auth', clientId);
 
-        return new Promise((resolve, reject) => {
-            let settled = false;
+function getExistingClient() {
+    if (currentClientId)
+        return currentClientId;
 
-            const waSocket = makeWASocket({
-                auth: state,
-                version,
-                shouldSyncHistoryMessage: () => false,
-                printQRInTerminal: false,
-                browser: ['MultiClient', 'Chrome', '3.0'],
-                markOnlineOnConnect: false,
-                generateHighQualityLinkPreview: false,
-            });
+    const dirPath = path.join(__dirname, 'auth');
+    if (!fs.existsSync(dirPath + "/creds.json")) return null;
 
-            waSocket.ev.on('creds.update', async () => {
-                try {
-                    await saveCreds();
-                } catch (error) {
-                    console.error("Error saving creds:", error);
-                }
-            });
+    const folders = fs.readdirSync(dirPath, { withFileTypes: true })
+        .filter(item => item.isDirectory())
+        .map(item => item.name);
 
-            waSocket.ev.on('connection.update', async (update) => {
-                const { connection, lastDisconnect, qr } = update;
-
-                if (!settled && qr) {
-                    try {
-                        const qrBase64 = await qrcode.toDataURL(qr);
-                        settled = true;
-                        return resolve({
-                            success: true,
-                            message: 'QR code generated',
-                            data: { qrCode: qrBase64 },
-                        });
-                    } catch (error) {
-                        settled = true;
-                        return reject({
-                            success: false,
-                            message: 'Failed to generate QR code',
-                            data: { error },
-                        });
-                    }
-                }
-
-                if (connection === 'close') {
-                    const reason = lastDisconnect?.error?.output?.statusCode;
-                    console.log(`❌ Connection closed for ${clientId}. Reason: ${reason}`);
-
-                    sock?.ev.removeAllListeners();
-                    sock?.end();
-
-                    if (reason === DisconnectReason.restartRequired || reason === DisconnectReason.streamErrored) {
-                        console.log(`🔄 Restarting session for ${clientId}...`);
-                        setTimeout(() => createSession(clientId), 2000);
-                    }
-
-                    settled = true;
-                    return reject({ success: false, message: "Connection closed", data: {} });
-                }
-
-                if (!settled && connection === 'open') {
-                    console.log(`✅ ${clientId} connected`);
-                    if (sock) {
-                        try {
-                            sock.ev.removeAllListeners();
-                            sock.end();
-                        } catch { }
-                    }
-                    sock = waSocket;
-                    settled = true;
-                    return resolve({ success: true, message: "Connected", data: {} });
-                }
-            });
-
-            waSocket.ev.on('connection.error', (error) => {
-                console.error('Connection error:', error);
-                sock?.ev.removeAllListeners();
-                sock?.end();
-                sock = null;
-                if (!settled) reject({ success: false, message: "Failed to connect", data: { error } });
-            });
-        });
-    } catch (error) {
-        console.error("Error in createSession:", error);
-        throw error;
-    }
+    return folders.length > 0 ? folders[0] : null;
 }
 
-// ✅ Routes
-app.get('/login/:clientId', async (req, res) => {
+// ✅ Fixed & Stable Session Creator
+async function createSession(clientId, retryCount = 0) {
+    if (sock && getExistingClient() === clientId) {
+        return { success: true, message: "Already connected", data: {} };
+    }
+
+    const sessionPath = getSessionPath(clientId);
+    fs.mkdirSync(sessionPath, { recursive: true });
+
+    const { version } = await fetchLatestBaileysVersion();
+    const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const timeout = setTimeout(() => {
+            if (!settled) {
+                settled = true;
+                reject({ success: false, message: "Session timeout" });
+            }
+        }, 20000);
+
+        if (sock) {
+            try {
+                sock.ev.removeAllListeners();
+                sock.end();
+            } catch { }
+        }
+
+        sock = makeWASocket({
+            auth: state,
+            version,
+            printQRInTerminal: false,
+            browser: ['MultiClient', 'Chrome', '3.0'],
+            markOnlineOnConnect: false,
+            generateHighQualityLinkPreview: false,
+            retryRequestDelayMs: 5000,
+        });
+
+        sock.ev.on('creds.update', saveCreds);
+
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+
+            if (qr && !settled) {
+                try {
+                    const qrBase64 = await qrcode.toDataURL(qr);
+                    settled = true;
+                    clearTimeout(timeout);
+                    return resolve({
+                        success: true,
+                        message: 'QR code generated',
+                        data: { qrCode: qrBase64 }
+                    });
+                } catch (error) {
+                    settled = true;
+                    clearTimeout(timeout);
+                    return reject({ success: false, message: 'Failed to generate QR code' });
+                }
+            }
+
+            // Connected Successfully
+            if (connection === 'open' && !settled) {
+                console.log(`✅ ${clientId} connected successfully`);
+                settled = true;
+                currentClientId = clientId;
+                clearTimeout(timeout);
+                return resolve({ success: true, message: "Connected", data: {} });
+            }
+
+            // Connection Closed
+            if (connection === 'close') {
+                const reason = lastDisconnect?.error?.output?.statusCode;
+                console.log(`❌ Connection closed for ${clientId}. Reason: ${reason}`);
+
+                sock = null;
+                currentClientId = null;
+
+
+                if ([DisconnectReason.restartRequired, DisconnectReason.streamErrored].includes(reason)) {
+                    if (!isReconnecting && retryCount < MAX_RETRIES) {
+                        isReconnecting = true;
+
+                        setTimeout(async () => {
+                            try {
+                                await createSession(clientId, retryCount + 1);
+                            } finally {
+                                isReconnecting = false;
+                            }
+                        }, 3000);
+                    }
+                }
+
+                if ([DisconnectReason.loggedOut, DisconnectReason.badSession].includes(reason)) {
+                    const sessionPath = getSessionPath(clientId);
+                    await fs.promises.rm(sessionPath, { recursive: true, force: true });
+                }
+
+                if (!settled) {
+                    settled = true;
+                    clearTimeout(timeout);
+                    reject({ success: false, message: "Connection closed" });
+                }
+            }
+        });
+
+        sock.ev.on('error', (err) => {
+            console.error('Socket Error:', err);
+            if (!settled) {
+                settled = true;
+                clearTimeout(timeout);
+                reject({ success: false, message: "Connection error" });
+            }
+        });
+    });
+}
+
+// ====================== ROUTES ======================
+
+app.get('/whats-app/login/:clientId', async (req, res) => {
     const { clientId } = req.params;
+
     const existingClient = getExistingClient();
     if (existingClient && existingClient !== clientId) {
         return res.status(400).json({
             success: false,
-            message: `Already connected with another client (${existingClient})`
+            message: `Another client is already active: ${existingClient}`
         });
     }
 
-    if (sock) {
-        return res.json({ success: true, data: [{ webWhatsAppStatus: "ACTIVE" }], message: "Already connected" });
+    if (sock && existingClient === clientId) {
+        return res.json({ success: true, data: { webWhatsAppStatus: "ACTIVE" }, message: "Already connected" });
     }
+
     try {
         const response = await createSession(clientId);
         res.status(response.success ? 200 : 500).json(response);
     } catch (error) {
-        console.error("❌ Session creation failed:", error);
-        res.status(500).json(error);
+        console.error("Session creation failed:", error);
+        res.status(500).json({ success: false, message: error.message || "Failed to create session" });
     }
 });
 
-app.get('/status/:clientId', async (req, res) => {
+app.get('/whats-app/status/:clientId', (req, res) => {
     const { clientId } = req.params;
     const existingClient = getExistingClient();
-    try {
-        if (existingClient === clientId) {
-            return res.status(200).json({ success: true, data: [{ webWhatsAppStatus: "ACTIVE" }], message: "Client is connected" });
-        } else {
-            return res.status(400).json({ success: true, data: [{ webWhatsAppStatus: "INACTIVE" }], message: "Client is not connected" });
-        }
-    } catch (error) {
-        console.error("❌ Status check failed:", error);
-        res.status(500).json({ success: false, error });
+
+    if (existingClient === clientId && sock) {
+        return res.json({ success: true, data: { webWhatsAppStatus: "ACTIVE" }, message: "Client is connected" });
+    } else {
+        return res.json({ success: true, data: { webWhatsAppStatus: "INACTIVE" }, message: "Client is not connected" });
     }
 });
 
-
-app.get('/logout', async (req, res) => {
+app.get('/whats-app/logout', async (req, res) => {
     try {
-        sock?.ev.removeAllListeners();
-        sock?.end();
-        sock = null;
+        if (sock) {
+            sock.ev.removeAllListeners();
+            sock.end();
+            sock = null;
+            currentClientId = null;
+        }
 
         const authPath = path.join(__dirname, 'auth');
-
         if (fs.existsSync(authPath)) {
-            await fs.promises.rm(authPath, {
-                recursive: true,
-                force: true
-            });
+            await fs.promises.rm(authPath, { recursive: true, force: true });
         }
 
         res.json({ success: true, message: "Logout successful" });
     } catch (error) {
-        res.status(500).json({ success: false, error });
+        res.status(500).json({ success: false, message: error.message });
     }
 });
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } });
-
-app.post('/send/:clientId', upload.single("file"), async (req, res) => {
+app.post('/whats-app/send/:clientId', upload.single("file"), async (req, res) => {
     const { clientId } = req.params;
     const { numbers, message } = req.body;
-    try {
-        const existingClient = getExistingClient();
 
-        if (!sock || existingClient !== clientId) {
-            return res.status(400).json({
-                error: `Client ${clientId} not active`
-            });
+    if (getExistingClient() !== clientId) {
+        return res.status(400).json({ error: `Client ${clientId} is not active` });
+    }
+
+    if (!sock) {
+        const existing = getExistingClient();
+        if (existing) {
+            console.log(`♻️ Restoring previous session for ${existing}...`);
+            try {
+                await createSession(existing);
+            } catch (error) {
+                return res.status(400).json({ error: `Client ${clientId} is not active` });
+            }
         }
+    }
 
-        if (!numbers) return res.status(400).json({ error: "Numbers are required" });
-        if (!message && !req.file) return res.status(400).json({ error: "Message or file is required" });
+    if (!numbers) return res.status(400).json({ error: "Numbers are required" });
+    if (!message && !req.file) return res.status(400).json({ error: "Message or file is required" });
 
+    try {
         const parsedNumbers = JSON.parse(numbers || '[]');
         const failed = [];
         const sentTo = [];
 
         for (const number of parsedNumbers) {
             const jid = number.endsWith('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`;
+
             try {
                 if (req.file) {
                     const mime = req.file.mimetype;
                     const buf = req.file.buffer;
                     let msg = {};
+
                     if (mime.startsWith("image/")) msg = { image: buf, mimetype: mime, caption: message || "" };
                     else if (mime.startsWith("video/")) msg = { video: buf, mimetype: mime, caption: message || "" };
                     else if (mime.startsWith("audio/")) msg = { audio: buf, mimetype: mime };
                     else msg = { document: buf, mimetype: mime, fileName: req.file.originalname };
+
                     await sock.sendMessage(jid, msg);
-                } else await sock.sendMessage(jid, { text: message });
+                } else {
+                    await sock.sendMessage(jid, { text: message });
+                }
                 sentTo.push(number);
             } catch (err) {
                 console.error(`Failed to send to ${number}:`, err.message);
@@ -232,55 +282,32 @@ app.post('/send/:clientId', upload.single("file"), async (req, res) => {
 
         res.json({ success: true, sentTo, failed });
     } catch (error) {
-        console.error("❌ Sending failed:", error);
-        res.status(500).json({ success: false, message: error.message || "Internal server error" });
+        console.error("Sending failed:", error);
+        res.status(500).json({ success: false, message: error.message });
     }
 });
 
-// ✅ Robust Global Error Handlers
+// Global Error Handlers
 process.on('uncaughtException', (err) => {
     console.error('🔥 Uncaught Exception:', err);
-    restartService();
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason) => {
     console.error('🔥 Unhandled Rejection:', reason);
-    restartService();
 });
 
 process.on('SIGINT', () => {
-    console.log("🛑 Gracefully shutting down...");
-    sock?.ev.removeAllListeners();
-    sock?.end();
+    console.log("🛑 Shutting down...");
+    if (sock) sock.end();
     process.exit(0);
 });
 
-function restartService() {
-    console.log('♻️ Restarting service due to critical failure...');
-    try {
-        sock?.ev.removeAllListeners();
-        sock?.end();
-    } catch { }
-    setTimeout(() => process.exit(1), 1000); // will restart if using PM2 or wrapper
-}
-
 app.listen(PORT, () => {
-    const clientId = getExistingClient()
-    if (clientId) {
-        createSession(clientId);
+    const existing = getExistingClient();
+    if (existing) {
+        currentClientId = existing;
+        console.log(`♻️ Restoring previous session for ${existing}...`);
+        createSession(existing).catch(console.error);
     }
-    console.log(`🚀 Multi-client WhatsApp API running on http://localhost:${PORT}`);
+    console.log(`🚀 WhatsApp API running on http://localhost:${PORT}`);
 });
-
-function getExistingClient() {
-    const dirPath = path.join(__dirname, 'auth');
-
-    if (!fs.existsSync(dirPath)) return null;
-
-    const folders = fs.readdirSync(dirPath, { withFileTypes: true })
-        .filter(item => item.isDirectory())
-        .map(item => item.name);
-
-    return folders.length > 0 ? folders[0] : null;
-}
-
