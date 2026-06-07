@@ -72,14 +72,18 @@ function getExistingClient(authBasePath) {
     if (currentClientId) return currentClientId;
     if (!fs.existsSync(authBasePath)) return null;
 
-    // Check for a direct creds.json at the auth root (legacy)
-    if (fs.existsSync(path.join(authBasePath, 'creds.json'))) return null;
-
+    // Only return a clientId if its session folder contains creds.json (valid session)
     const folders = fs.readdirSync(authBasePath, { withFileTypes: true })
         .filter(item => item.isDirectory())
-        .map(item => item.name);
+        .map(item => item.name)
+        .filter(name => fs.existsSync(path.join(authBasePath, name, 'creds.json')));
 
     return folders.length > 0 ? folders[0] : null;
+}
+
+// Returns true if there is a valid saved session on disk
+function hasExistingSession(authBasePath) {
+    return getExistingClient(authBasePath) !== null;
 }
 
 // ─── Core: Session creator ────────────────────────────────────────────────────
@@ -477,7 +481,7 @@ function startServer(options = {}) {
         });
     }
 
-    return { app, server, stop, connectClient, disconnectClient, restartClient, getStatus };
+    return { app, server, stop, connectClient, disconnectClient, restartClient, getStatus, hasExistingSession: () => hasExistingSession(authBasePath) };
 }
 
-module.exports = { startServer };
+module.exports = { startServer, hasExistingSession };

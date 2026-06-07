@@ -34,6 +34,10 @@ let tray      = null;
 let serverHandle = null;
 let isQuitting   = false;
 
+// Buffer for events that fire before the window is ready to receive them
+let lastStatus   = null;  // { event, data } — most recent wa:status event
+let lastQR       = null;  // base64 string — most recent QR (cleared when connected)
+
 // Persisted settings (clientId, port) stored in userData
 const settingsPath = path.join(app.getPath('userData'), 'settings.json');
 
@@ -81,7 +85,6 @@ function initServer() {
         authBasePath,
 
         onStatusChange(event, data) {
-            // Map server events → renderer channel
             const statusMap = {
                 'initializing':    { waStatus: 'Initializing',      type: 'info' },
                 'qr':              { waStatus: 'QR Generated',       type: 'qr'  },
@@ -97,10 +100,18 @@ function initServer() {
             const mapped = statusMap[event];
 
             if (event === 'qr') {
+                lastQR = data.qrBase64;
+                lastStatus = { waStatus: 'Waiting for Scan', type: 'qr', event };
                 sendToRenderer('wa:qr', data.qrBase64);
-                sendToRenderer('wa:status', { waStatus: 'Waiting for Scan', type: 'qr', event });
+                sendToRenderer('wa:status', lastStatus);
             } else {
-                sendToRenderer('wa:status', { ...(mapped || {}), event, ...data });
+                const payload = { ...(mapped || {}), event, ...data };
+                lastStatus = payload;
+                // Clear QR buffer once connected or session cleared
+                if (event === 'connected' || event === 'session-cleared' || event === 'disconnected') {
+                    lastQR = null;
+                }
+                sendToRenderer('wa:status', payload);
             }
         },
 
@@ -139,6 +150,13 @@ function createWindow() {
 
     win.once('ready-to-show', () => {
         win.show();
+        // Replay any status/QR that arrived before the window was ready
+        if (lastStatus) {
+            win.webContents.send('wa:status', lastStatus);
+        }
+        if (lastQR) {
+            win.webContents.send('wa:qr', lastQR);
+        }
     });
 
     // Minimize to tray instead of closing
@@ -214,6 +232,11 @@ function registerIPC() {
     });
 
     ipcMain.handle('get-client-id', () => loadSettings().clientId || DEFAULT_CLIENT_ID);
+
+    // Let the renderer check at startup whether valid session files exist on disk
+    ipcMain.handle('get-has-session', () => {
+        return serverHandle ? serverHandle.hasExistingSession() : false;
+    });
 
     ipcMain.handle('set-client-id', (_, id) => {
         if (id && typeof id === 'string') saveSettings({ clientId: id });

@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getPort:      ()         => ipcRenderer.invoke('get-port'),
     getClientId:  ()         => ipcRenderer.invoke('get-client-id'),
     setClientId:  (id)       => ipcRenderer.invoke('set-client-id', id),
+    getHasSession: ()        => ipcRenderer.invoke('get-has-session'),
 
     // ── Server-push event listeners ────────────────────────────────────────
     onWAStatus:   (cb) => ipcRenderer.on('wa:status',   (_, data) => cb(data)),

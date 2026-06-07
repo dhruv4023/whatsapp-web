@@ -181,21 +181,34 @@ async function init() {
         clientIdInput.value = id;
     } catch (_) {}
 
-    // Initial WA status
+    // Determine initial UI state:
+    //  1. If already connected (very fast restore) → show connected
+    //  2. If session files exist on disk → show "Restoring Session" (server is auto-restoring)
+    //  3. Otherwise → show "Not Connected"
     try {
-        const status = await window.electronAPI.getStatus();
+        const [status, hasSession] = await Promise.all([
+            window.electronAPI.getStatus(),
+            window.electronAPI.getHasSession(),
+        ]);
+
         if (status.connected) {
             showConnected(status.clientId);
+            addLog('success', `Session restored for client: ${status.clientId}`);
+        } else if (hasSession) {
+            // Session files exist — server is in the process of restoring
+            setWAStatus('Restoring Session');
+            qrHint.textContent = 'Restoring previous WhatsApp session...';
+            addLog('info', 'Existing session found — restoring automatically...');
+            updateButtons(false); // Connect disabled while restoring
         } else {
             showIdle();
             setWAStatus('Not Connected');
+            addLog('info', 'No saved session found. Click Connect to get started.');
         }
     } catch (_) {
         showIdle();
+        addLog('info', 'Application started — server initializing...');
     }
-
-    // Add startup log
-    addLog('info', 'Application started — server initializing...');
 }
 
 // ─── Event listeners from main process ───────────────────────────────────────
@@ -210,19 +223,33 @@ window.electronAPI.onWAStatus((data) => {
     } else if (event === 'disconnected') {
         showIdle('WhatsApp disconnected. Click Connect to reconnect.');
         setWAStatus('Disconnected');
+        updateButtons(false);       // Re-enable Connect so user can retry
     } else if (event === 'session-cleared') {
         showIdle('Session cleared. Click Connect to start a new session.');
         setWAStatus('Not Connected');
+        updateButtons(false);
     } else if (event === 'initializing') {
         setWAStatus('Initializing');
         qrHint.textContent = 'Initializing WhatsApp client...';
+        // Keep Connect disabled while initializing
+        btnConnect.disabled = true;
+        spinnerConnect.classList.add('visible');
     } else if (event === 'restoring') {
         setWAStatus('Restoring Session');
-        qrHint.textContent = 'Restoring previous session...';
+        qrHint.textContent = 'Restoring previous WhatsApp session...';
+        // Keep Connect disabled while restoring
+        btnConnect.disabled = true;
+        spinnerConnect.classList.add('visible');
     } else if (event === 'reconnecting') {
         setWAStatus('Reconnecting...');
         const msg = attempt ? `Reconnecting (attempt ${attempt}/${max})...` : 'Reconnecting...';
         qrHint.textContent = msg;
+    } else if (event === 'error') {
+        // If an error occurs during restore/init, re-enable Connect
+        if (!connected) {
+            updateButtons(false);
+            showIdle('Session restore failed. Click Connect to try again.');
+        }
     }
 });
 
