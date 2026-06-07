@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="WhatsApp Desktop — Manage your WhatsApp API session from a native desktop interface." />
+    <title>WhatsApp Desktop</title>
+    <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div id="app">
+
+    <!-- ── Header ─────────────────────────────────────────────────────── -->
+    <header>
+        <div class="header-left">
+            <img class="app-logo" src="../icon.png" alt="WhatsApp Desktop Logo" />
+            <span class="app-title">WhatsApp Desktop</span>
+        </div>
+        <div class="header-right">
+            <span class="app-version" id="app-version">v1.0.0</span>
+        </div>
+    </header>
+
+    <!-- ── Status Bar ─────────────────────────────────────────────────── -->
+    <div class="status-bar">
+        <div class="status-pill pill-server-running" id="server-pill">
+            <span class="dot"></span>
+            <span id="server-status-text">Server Running</span>
+        </div>
+
+        <div class="status-pill pill-idle" id="wa-pill">
+            <span class="dot"></span>
+            <span id="wa-status-text">Not Connected</span>
+        </div>
+
+        <div class="port-badge">
+            PORT&nbsp;<span id="port-display">5002</span>
+        </div>
+    </div>
+
+    <!-- ── Main Content ────────────────────────────────────────────────── -->
+    <div class="main">
+
+        <!-- Left: QR + Controls -->
+        <div class="panel-left">
+
+            <!-- QR / Connection Card -->
+            <div class="qr-card" id="qr-card">
+                <span class="qr-card-title">WhatsApp Authentication</span>
+
+                <div class="qr-display">
+                    <!-- Placeholder (shown when idle / no QR) -->
+                    <div class="qr-placeholder" id="qr-placeholder">
+                        <!-- Phone icon -->
+                        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="5" y="2" width="14" height="20" rx="2" ry="2"/>
+                            <line x1="12" y1="18" x2="12.01" y2="18"/>
+                        </svg>
+                        <span>QR code will appear here<br/>when connecting</span>
+                    </div>
+
+                    <!-- QR Image (shown when QR received) -->
+                    <img id="qr-image" alt="WhatsApp QR Code" />
+
+                    <!-- Connected state (shown when connected) -->
+                    <div class="connected-indicator" id="connected-indicator">
+                        <div class="connected-icon">
+                            <!-- Checkmark icon -->
+                            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="20 6 9 17 4 12"/>
+                            </svg>
+                        </div>
+                        <span class="connected-label">Connected</span>
+                        <span class="connected-sub" id="connected-client-label">Session active</span>
+                    </div>
+                </div>
+
+                <p class="qr-hint" id="qr-hint">
+                    Click <strong>Connect</strong> to start your WhatsApp session
+                </p>
+            </div>
+
+            <!-- Client ID Row -->
+            <div class="client-id-row">
+                <span class="client-id-label">Client ID</span>
+                <input
+                    id="client-id-input"
+                    type="text"
+                    placeholder="default-client"
+                    autocomplete="off"
+                    spellcheck="false"
+                />
+                <button class="btn-save-id" id="btn-save-id">Save</button>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="actions">
+                <button class="btn btn-primary" id="btn-connect">
+                    <!-- Plug icon -->
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 22V12"/>
+                        <path d="M5 12H2a10 10 0 0 0 20 0h-3"/>
+                        <rect x="8" y="2" width="8" height="10" rx="2"/>
+                    </svg>
+                    Connect
+                    <span class="spinner" id="spinner-connect"></span>
+                </button>
+
+                <button class="btn btn-secondary" id="btn-restart" disabled>
+                    <!-- Refresh icon -->
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="23 4 23 10 17 10"/>
+                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                    </svg>
+                    Restart
+                    <span class="spinner" id="spinner-restart"></span>
+                </button>
+
+                <button class="btn btn-danger" id="btn-disconnect" disabled>
+                    <!-- Unplug icon -->
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M10 2v3"/>
+                        <path d="M14 2v3"/>
+                        <path d="M10 19v3"/>
+                        <path d="M14 19v3"/>
+                        <path d="M5 9a2 2 0 0 0-2 2v2a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-2a2 2 0 0 0-2-2H5z"/>
+                    </svg>
+                    Disconnect
+                </button>
+
+                <button class="btn btn-amber" id="btn-clear-session">
+                    <!-- Trash icon -->
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="3 6 5 6 21 6"/>
+                        <path d="M19 6l-1 14H6L5 6"/>
+                        <path d="M10 11v6"/>
+                        <path d="M14 11v6"/>
+                        <path d="M9 6V4h6v2"/>
+                    </svg>
+                    Clear Session
+                </button>
+            </div>
+
+        </div>
+
+        <!-- Right: Logs -->
+        <div class="panel-right">
+            <div class="logs-header">
+                <span class="logs-title">
+                    <!-- Terminal icon -->
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="4 17 10 11 4 5"/>
+                        <line x1="12" y1="19" x2="20" y2="19"/>
+                    </svg>
+                    Activity Log
+                    <span class="log-count" id="log-count">0</span>
+                </span>
+                <button class="btn-clear-logs" id="btn-clear-logs">Clear</button>
+            </div>
+            <div id="log-panel" role="log" aria-live="polite"></div>
+        </div>
+
+    </div><!-- /.main -->
+
+</div><!-- /#app -->
+
+<script src="app.js"></script>
+</body>
+</html>

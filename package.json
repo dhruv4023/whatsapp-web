@@ -1,12 +1,19 @@
 {
-  "name": "whatsapp-sender",
+  "name": "whatsapp-desktop",
+  "productName": "WhatsApp Desktop",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "WhatsApp API Desktop Application — wraps the Baileys Express server in a native Electron GUI",
+  "main": "desktop/main.js",
   "scripts": {
     "start": "npx pm2 start ecosystem.config.js --env production",
-    "dev": "nodemon index.js",
+    "dev": "node index.js",
+    "nodemon": "nodemon index.js",
     "stop": "npx pm2 stop all",
+    "electron": "electron . --no-sandbox",
+    "electron:dev": "NODE_ENV=development electron . --no-sandbox",
+    "electron:build": "electron-builder",
+    "electron:build:linux": "electron-builder --linux",
+    "electron:build:win": "electron-builder --win",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -22,8 +29,75 @@
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3",
     "mysql2": "^3.14.1",
     "nodemon": "^3.1.10",
     "qrcode-terminal": "^0.12.0"
+  },
+  "build": {
+    "appId": "com.whatsapp.desktop",
+    "productName": "WhatsApp Desktop",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "desktop/**/*",
+      "server/**/*",
+      "shared/**/*",
+      "index.js",
+      "db.js",
+      "ecosystem.config.js",
+      "package.json",
+      ".env",
+      "node_modules/**/*",
+      "!node_modules/.cache",
+      "!node_modules/electron",
+      "!node_modules/electron-builder",
+      "!node_modules/nodemon",
+      "!node_modules/qrcode-terminal"
+    ],
+    "extraResources": [],
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/@whiskeysockets/**",
+      "node_modules/sharp/**",
+      "node_modules/canvas/**"
+    ],
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "desktop/icon.png",
+      "category": "Utility"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "desktop/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "desktop/icon.png",
+      "uninstallerIcon": "desktop/icon.png"
+    }
   }
 }
